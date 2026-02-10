@@ -1,7 +1,7 @@
 package com.tokoko.spark.adbc
 
-import org.apache.arrow.adbc.core.AdbcDriver
 import org.apache.arrow.adbc.drivermanager.AdbcDriverManager
+import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
@@ -9,20 +9,17 @@ import org.apache.spark.sql.util.ArrowUtilsExtended
 
 import collection.JavaConverters._
 
-class AdbcPartitionReader(driver: String, url: String, query: String) extends PartitionReader[InternalRow] {
+class AdbcPartitionReader(driver: String, params: Map[String, String], query: String) extends PartitionReader[InternalRow] {
   var queryExecuted = false
   var iterator: Iterator[InternalRow] = _
   var batchReader: ArrowReader = _
 
   override def next(): Boolean = {
     if (!queryExecuted) {
-      val parameters: Map[String, Object] = Map(AdbcDriver.PARAM_URL -> url)
-
-      Class.forName(driver)
-
+      val allocator = new RootAllocator(Long.MaxValue)
+      val parameters: java.util.Map[String, Object] = params.mapValues(v => v: Object).asJava
       val database = AdbcDriverManager.getInstance()
-        .connect(driver.split('.').init.mkString("."), parameters.asJava)
-
+        .connect(driver, allocator, parameters)
 
       val adbcConn = database.connect()
 

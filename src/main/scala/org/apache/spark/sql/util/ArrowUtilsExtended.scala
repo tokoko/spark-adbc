@@ -22,7 +22,7 @@ object ArrowUtilsExtended {
   // TODO timezone is hardcoded in some methods
 
   def toArrowSchema(schema: StructType, timeZoneId: String): Schema = {
-    ArrowUtils.toArrowSchema(schema, timeZoneId)
+    ArrowUtils.toArrowSchema(schema, timeZoneId, errorOnDuplicatedFieldNames = true, largeVarTypes = false)
   }
 
   def fromArrowSchema(schema: Schema): StructType = {
@@ -37,7 +37,7 @@ object ArrowUtilsExtended {
                         schema: StructType,
                         timeZoneId: String,
                         context: TaskContext): Iterator[InternalRow] = {
-    ArrowConverters.fromBatchIterator(arrowBatchIter, schema, timeZoneId, context)
+    ArrowConverters.fromBatchIterator(arrowBatchIter, schema, timeZoneId, errorOnDuplicatedFieldNames = true, context)
   }
 
   def toBatchIterator(rowIter: Iterator[InternalRow],
@@ -45,7 +45,7 @@ object ArrowUtilsExtended {
                        maxRecordsPerBatch: Int,
                        timeZoneId: String,
                        context: TaskContext): Iterator[Array[Byte]] = {
-    ArrowConverters.toBatchIterator(rowIter, schema, maxRecordsPerBatch, timeZoneId, context)
+    ArrowConverters.toBatchIterator(rowIter, schema, maxRecordsPerBatch, timeZoneId, errorOnDuplicatedFieldNames = true, context)
   }
 
   def toVectorSchemaRoot(rowIter: Iterator[InternalRow], schema: StructType): VectorSchemaRoot = {

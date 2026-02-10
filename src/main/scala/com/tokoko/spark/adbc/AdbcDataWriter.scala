@@ -1,7 +1,8 @@
 package com.tokoko.spark.adbc
 
-import org.apache.arrow.adbc.core.{AdbcDriver, BulkIngestMode}
+import org.apache.arrow.adbc.core.BulkIngestMode
 import org.apache.arrow.adbc.drivermanager.AdbcDriverManager
+import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
 import org.apache.spark.sql.types.StructType
@@ -10,7 +11,7 @@ import org.apache.spark.sql.util.ArrowUtilsExtended
 import scala.collection.mutable
 import collection.JavaConverters._
 
-class AdbcDataWriter(schema: StructType, driver: String, url: String, table: String) extends DataWriter[InternalRow] {
+class AdbcDataWriter(schema: StructType, driver: String, params: Map[String, String], table: String) extends DataWriter[InternalRow] {
   // TODO more efficient solution???
   private val rowList = mutable.ListBuffer.empty[InternalRow]
 
@@ -26,12 +27,10 @@ class AdbcDataWriter(schema: StructType, driver: String, url: String, table: Str
       schema
     )
 
-    val parameters: Map[String, Object] = Map(AdbcDriver.PARAM_URL -> url)
-
-    Class.forName(driver)
-
+    val allocator = new RootAllocator(Long.MaxValue)
+    val parameters: java.util.Map[String, Object] = params.mapValues(v => v: Object).asJava
     val database = AdbcDriverManager.getInstance()
-      .connect(driver.split('.').init.mkString("."), parameters.asJava)
+      .connect(driver, allocator, parameters)
 
     val adbcConn = database.connect()
 

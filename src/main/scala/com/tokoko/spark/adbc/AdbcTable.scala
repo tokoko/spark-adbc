@@ -16,19 +16,25 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
 
   override def capabilities(): util.Set[TableCapability] = Set(TableCapability.BATCH_READ, TableCapability.BATCH_WRITE).asJava
 
+  private val reservedKeys = Set("driver", "dbtable", "query")
+
+  private def extractParams(options: java.util.Map[String, String]): Map[String, String] = {
+    options.asScala.filterKeys(k => !reservedKeys.contains(k.toLowerCase)).toMap
+  }
+
   override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
-    val url = options.get("url")
     val query = options.get("query")
     val driver = options.get("driver")
+    val params = extractParams(options)
 
-    new AdbcScanBuilder(schema, driver, url, query)
+    new AdbcScanBuilder(schema, driver, params, query)
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
-    val url = info.options().get("url")
     val table = info.options().get("dbtable")
     val driver = info.options().get("driver")
+    val params = extractParams(info.options())
 
-    new AdbcWriteBuilder(schema, driver, url, table)
+    new AdbcWriteBuilder(schema, driver, params, table)
   }
 }
