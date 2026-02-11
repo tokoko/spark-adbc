@@ -1,6 +1,6 @@
-ThisBuild / scalaVersion := "2.12.18"
+ThisBuild / scalaVersion := "2.13.17"
 
-val sparkVersion = "3.5.1"
+val sparkVersion = "4.1.1"
 val adbcVersion = "0.22.0"
 val arrowVersion = "18.3.0"
 
@@ -16,11 +16,6 @@ lazy val root = (project in file("."))
       "org.apache.arrow" % "arrow-memory-netty" % arrowVersion % Test,
       "org.xerial" % "sqlite-jdbc" % "3.47.2.0" % Test,
       "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % Test
-    ),
-    dependencyOverrides ++= Seq(
-      "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.2",
-      "com.fasterxml.jackson.core" % "jackson-core" % "2.15.2",
-      "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.15.2"
     ),
     Test / fork := true,
     Test / javaOptions ++= Seq(

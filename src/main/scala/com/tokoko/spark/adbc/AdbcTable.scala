@@ -6,7 +6,7 @@ import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import java.util
 
 class AdbcTable(schema: StructType) extends Table with SupportsRead with SupportsWrite{
@@ -23,11 +23,12 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
   }
 
   override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
-    val query = options.get("query")
+    val dbtable = Option(options.get("dbtable"))
+    val query = Option(options.get("query"))
     val driver = options.get("driver")
     val params = extractParams(options)
 
-    new AdbcScanBuilder(schema, driver, params, query)
+    new AdbcScanBuilder(schema, driver, params, dbtable, query)
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {

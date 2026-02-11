@@ -8,7 +8,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.{ArrowUtilsExtended, CaseInsensitiveStringMap}
 
 import java.util
-import collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 class DefaultSource extends TableProvider{
 
@@ -24,8 +24,8 @@ class DefaultSource extends TableProvider{
     val driver = options.get("driver")
 
     val parameters: java.util.Map[String, Object] = options.asScala
-      .filterKeys(k => !reservedKeys.contains(k.toLowerCase))
-      .mapValues(v => v: Object).asJava
+      .view.filterKeys(k => !reservedKeys.contains(k.toLowerCase))
+      .mapValues(v => v: Object).toMap.asJava
 
     val allocator = new RootAllocator(Long.MaxValue)
     val database = AdbcDriverManager.getInstance()
