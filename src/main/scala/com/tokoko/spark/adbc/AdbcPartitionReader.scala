@@ -10,19 +10,23 @@ import scala.jdk.CollectionConverters._
 
 class AdbcPartitionReader(driver: String, params: Map[String, String], query: String) extends PartitionReader[ColumnarBatch] {
   private var queryExecuted = false
+  private var allocator: RootAllocator = _
+  private var database: org.apache.arrow.adbc.core.AdbcDatabase = _
+  private var adbcConn: org.apache.arrow.adbc.core.AdbcConnection = _
+  private var statement: org.apache.arrow.adbc.core.AdbcStatement = _
   private var batchReader: ArrowReader = _
   private var currentBatch: ColumnarBatch = _
 
   override def next(): Boolean = {
     if (!queryExecuted) {
-      val allocator = new RootAllocator(Long.MaxValue)
+      allocator = new RootAllocator(Long.MaxValue)
       val parameters: java.util.Map[String, Object] = params.view.mapValues(v => v: Object).toMap.asJava
-      val database = AdbcDriverManager.getInstance()
+      database = AdbcDriverManager.getInstance()
         .connect(driver, allocator, parameters)
 
-      val adbcConn = database.connect()
+      adbcConn = database.connect()
 
-      val statement = adbcConn.createStatement()
+      statement = adbcConn.createStatement()
 
       statement.setSqlQuery(query)
       batchReader = statement.executeQuery().getReader
@@ -43,5 +47,11 @@ class AdbcPartitionReader(driver: String, params: Map[String, String], query: St
 
   override def get(): ColumnarBatch = currentBatch
 
-  override def close(): Unit = {}
+  override def close(): Unit = {
+    if (batchReader != null) batchReader.close()
+    if (statement != null) statement.close()
+    if (adbcConn != null) adbcConn.close()
+    if (database != null) database.close()
+    if (allocator != null) allocator.close()
+  }
 }

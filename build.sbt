@@ -15,10 +15,13 @@ lazy val root = (project in file("."))
       "org.apache.arrow.adbc" % "adbc-driver-jni" % adbcVersion % Test,
       "org.apache.arrow" % "arrow-memory-netty" % arrowVersion % Test,
       "org.xerial" % "sqlite-jdbc" % "3.47.2.0" % Test,
+      "org.postgresql" % "postgresql" % "42.7.4" % Test,
+      "org.apache.datafusion" %% "comet-spark-spark4.0" % "0.13.0" % Test,
       "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % Test
     ),
     Test / fork := true,
     Test / javaOptions ++= Seq(
+      "-Xmx8g",
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
       "--add-opens=java.base/java.lang=ALL-UNNAMED",
       "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",

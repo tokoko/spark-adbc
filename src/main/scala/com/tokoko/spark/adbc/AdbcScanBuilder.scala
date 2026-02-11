@@ -4,7 +4,7 @@ import org.apache.spark.sql.connector.expressions.{NamedReference, SortDirection
 import org.apache.spark.sql.connector.expressions.aggregate._
 import org.apache.spark.sql.connector.read.{Scan, ScanBuilder, SupportsPushDownAggregates, SupportsPushDownFilters, SupportsPushDownLimit, SupportsPushDownRequiredColumns, SupportsPushDownTopN}
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{DoubleType, LongType, StructField, StructType}
+import org.apache.spark.sql.types.{ByteType, ShortType, IntegerType, FloatType, DoubleType, LongType, StructField, StructType}
 
 class AdbcScanBuilder(
     schema: StructType,
@@ -142,7 +142,12 @@ class AdbcScanBuilder(
         StructField(s"count(${columnName(c.column())})", LongType, nullable = false)
       case s: Sum =>
         val col = columnName(s.column())
-        StructField(s"sum($col)", schema(col).dataType)
+        val sumType = schema(col).dataType match {
+          case ByteType | ShortType | IntegerType | LongType => LongType
+          case FloatType | DoubleType => DoubleType
+          case other => other
+        }
+        StructField(s"sum($col)", sumType)
       case m: Min =>
         val col = columnName(m.column())
         StructField(s"min($col)", schema(col).dataType)
