@@ -184,6 +184,9 @@ class AdbcJdbcBenchmarkTest extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.comet.exec.enabled", "true")
       .config("spark.comet.exec.all.enabled", "true")
       .config("spark.comet.columnar.shuffle.enabled", "false")
+      .config("spark.comet.sparkToColumnar.enabled", "true")
+      .config("spark.comet.sparkToColumnar.supportedOperatorList",
+        "Range,InMemoryTableScan,RDDScan,BatchScan")
       .getOrCreate()
 
     def pipeline(reader: String => DataFrame): Array[org.apache.spark.sql.Row] = {

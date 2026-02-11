@@ -48,5 +48,26 @@ Local benchmarks comparing spark-adbc against Spark's built-in JDBC connector, r
 | Column projection (2 of 6 cols) | 34.2s | 64.3s | **1.88x** |
 | Filtered read (`category = 'cat_5'`) | 5.6s | 6.2s | **1.11x** |
 | Aggregation (`GROUP BY` with `AVG`, `SUM`, `COUNT`) | 4.1s | 49.2s | **11.91x** |
+| Join + filter + aggregate (with Comet) | 15.8s | 43.7s | **2.76x** |
 
-\*The columnar benchmark measures Arrow batch ingestion without Spark's columnar-to-row conversion. This represents a **theoretical upper bound** — Spark currently converts columnar batches back to rows for most operations, so real-world queries go through the standard (non-columnar) read path. Native columnar execution engines like [Apache DataFusion Comet](https://github.com/apache/datafusion-comet) can unlock this potential by operating directly on Arrow batches.
+\*The columnar benchmark measures Arrow batch ingestion without Spark's columnar-to-row conversion. This represents a **theoretical upper bound** — Spark currently converts columnar batches back to rows for most operations, so real-world queries go through the standard (non-columnar) read path.
+
+### Apache DataFusion Comet
+
+[Apache DataFusion Comet](https://github.com/apache/datafusion-comet) can operate directly on the Arrow columnar batches returned by spark-adbc, avoiding Spark's columnar-to-row conversion for downstream operations like joins, filters, and aggregations. To enable this, configure Comet's experimental `sparkToColumnar` feature to accept `BatchScan` as a columnar source:
+
+```scala
+val spark = SparkSession.builder()
+  .config("spark.sql.extensions", "org.apache.comet.CometSparkSessionExtensions")
+  .config("spark.comet.enabled", "true")
+  .config("spark.comet.exec.enabled", "true")
+  .config("spark.comet.exec.all.enabled", "true")
+  .config("spark.comet.sparkToColumnar.enabled", "true")
+  .config("spark.comet.sparkToColumnar.supportedOperatorList",
+    "Range,InMemoryTableScan,RDDScan,BatchScan")
+  .getOrCreate()
+```
+
+This replaces Spark's `ColumnarToRow` with Comet's `CometSparkColumnarToColumnar` bridge, keeping the entire pipeline columnar through DataFusion's native execution engine.
+
+> **Note:** `CometSparkColumnarToColumnar` is not zero-copy — it reads values element-by-element from Spark's `ColumnVector` API and writes them into new Arrow vectors for Comet's native format, even though the source data is already Arrow-backed. This adds conversion overhead at the scan boundary, but all subsequent operations (joins, filters, aggregations) run natively in DataFusion without further conversion.
