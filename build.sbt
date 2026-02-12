@@ -50,6 +50,7 @@ lazy val driverTests = (project in file("driver-tests"))
       "org.apache.arrow.adbc" % "adbc-driver-jni" % adbcVersion % Test,
       "org.apache.arrow" % "arrow-memory-netty" % arrowVersion % Test,
       "org.xerial" % "sqlite-jdbc" % "3.47.2.0" % Test,
+      "org.duckdb" % "duckdb_jdbc" % "1.4.4.0" % Test,
       "org.postgresql" % "postgresql" % "42.7.4" % Test,
       "org.testcontainers" % "postgresql" % "1.21.4" % Test,
       "org.testcontainers" % "mssqlserver" % "1.21.4" % Test,
