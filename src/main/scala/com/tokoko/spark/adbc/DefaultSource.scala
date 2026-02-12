@@ -12,7 +12,8 @@ import scala.jdk.CollectionConverters._
 
 class DefaultSource extends TableProvider{
 
-  private val reservedKeys = Set("driver", "dbtable", "query", "dialect")
+  private val reservedKeys = Set("driver", "dbtable", "query", "dialect",
+    "partitioncolumn", "lowerbound", "upperbound", "numpartitions")
 
   // TODO runs a query to determine schema until ADBC supports more direct method for schema inference
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {

@@ -18,6 +18,15 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
   protected def readTable: DataFrame =
     adbcReader.option("dbtable", "employees").load()
 
+  protected def readTablePartitioned: DataFrame =
+    adbcReader
+      .option("dbtable", "employees")
+      .option("partitionColumn", "id")
+      .option("lowerBound", "1")
+      .option("upperBound", "4")
+      .option("numPartitions", "3")
+      .load()
+
   override def beforeAll(): Unit = {
     setupDatabase()
     spark = SparkSession.builder().master("local").getOrCreate()
@@ -134,6 +143,34 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
     val df = readTable.filter("salary > 2000").groupBy("name").agg(sum("salary").as("total"))
     df.show()
     assert(df.count() == 2)
+  }
+
+  test("partitioned read - all rows returned") {
+    val df = readTablePartitioned
+    df.show()
+    assert(df.count() == 3)
+    assert(df.columns.toSet == Set("id", "name", "salary"))
+  }
+
+  test("partitioned read - correct number of partitions") {
+    val df = readTablePartitioned
+    assert(df.rdd.getNumPartitions == 3)
+  }
+
+  test("partitioned read with filter") {
+    val df = readTablePartitioned.filter("salary > 2000")
+    df.show()
+    assert(df.count() == 2)
+  }
+
+  test("partitioned read with aggregation") {
+    val df = readTablePartitioned.agg(sum("salary"), min("salary"), max("salary"))
+    df.show()
+    val rows = df.collect()
+    assert(rows.length == 1)
+    assert(rows(0).get(0).asInstanceOf[Number].longValue() == 9000)
+    assert(rows(0).get(1).asInstanceOf[Number].longValue() == 2000)
+    assert(rows(0).get(2).asInstanceOf[Number].longValue() == 4000)
   }
 
 }

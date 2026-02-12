@@ -4,7 +4,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class AdbcPartitionReaderFactory(driver: String, params: Map[String, String], query: String) extends PartitionReaderFactory {
+class AdbcPartitionReaderFactory(driver: String, params: Map[String, String]) extends PartitionReaderFactory {
   override def supportColumnarReads(partition: InputPartition): Boolean = true
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
@@ -12,6 +12,7 @@ class AdbcPartitionReaderFactory(driver: String, params: Map[String, String], qu
   }
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
-    new AdbcPartitionReader(driver, params, query)
+    val adbcPartition = partition.asInstanceOf[AdbcPartition]
+    new AdbcPartitionReader(driver, params, adbcPartition.query)
   }
 }

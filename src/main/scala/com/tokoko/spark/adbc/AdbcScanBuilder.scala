@@ -17,13 +17,19 @@ class AdbcScanBuilder(
     params: Map[String, String],
     dbtable: Option[String],
     query: Option[String],
-    dialect: SqlDialect = DefaultDialect
+    dialect: SqlDialect = DefaultDialect,
+    partitionColumn: Option[String] = None,
+    lowerBound: Option[Long] = None,
+    upperBound: Option[Long] = None,
+    numPartitions: Option[Int] = None
 ) extends ScanBuilder
   with SupportsPushDownRequiredColumns
   with SupportsPushDownFilters
   with SupportsPushDownLimit
   with SupportsPushDownTopN
   with SupportsPushDownAggregates {
+
+  private val isPartitioned: Boolean = partitionColumn.isDefined
 
   private var prunedSchema: StructType = schema
   private var pushedFilterArray: Array[Filter] = Array.empty
@@ -46,11 +52,13 @@ class AdbcScanBuilder(
   override def isPartiallyPushed(): Boolean = false
 
   override def pushLimit(limit: Int): Boolean = {
+    if (isPartitioned) return false
     pushedLimit = Some(limit)
     true
   }
 
   override def pushTopN(orders: Array[SortOrder], limit: Int): Boolean = {
+    if (isPartitioned) return false
     val supported = orders.forall(_.expression().isInstanceOf[NamedReference])
     if (supported) {
       pushedOrders = orders
@@ -62,6 +70,7 @@ class AdbcScanBuilder(
   }
 
   override def pushAggregation(aggregation: Aggregation): Boolean = {
+    if (isPartitioned) return false
     val groupBySupported = aggregation.groupByExpressions().forall(_.isInstanceOf[NamedReference])
     if (!groupBySupported) return false
 
@@ -88,9 +97,7 @@ class AdbcScanBuilder(
       case None => s"(${query.get}) AS T"
     }
 
-    val whereClause = if (pushedFilterArray.nonEmpty) {
-      " WHERE " + pushedFilterArray.map(FilterConverter.convert).mkString(" AND ")
-    } else ""
+    val filterPredicates = pushedFilterArray.map(FilterConverter.convert).toSeq
 
     val (selectClause, groupByClause) = pushedAggregation match {
       case Some(agg) =>
@@ -118,7 +125,14 @@ class AdbcScanBuilder(
     val topPrefix = dialect.selectPrefix(pushedLimit)
     val limitClause = dialect.limitSuffix(pushedLimit)
 
-    val finalQuery = s"SELECT $topPrefix$selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause"
+    val queries: Array[String] = if (isPartitioned) {
+      generatePartitionQueries(selectClause, baseRelation, filterPredicates)
+    } else {
+      val whereClause = if (filterPredicates.nonEmpty) {
+        " WHERE " + filterPredicates.mkString(" AND ")
+      } else ""
+      Array(s"SELECT $topPrefix$selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause")
+    }
 
     val outputSchema = if (pushedAggregation.isDefined) {
       inferSchemaFromQuery(dialect.schemaInferenceQuery(selectClause, baseRelation, groupByClause))
@@ -126,7 +140,39 @@ class AdbcScanBuilder(
       prunedSchema
     }
 
-    new AdbcScan(driver, outputSchema, params, finalQuery)
+    new AdbcScan(driver, outputSchema, params, queries)
+  }
+
+  private def generatePartitionQueries(
+      selectClause: String,
+      baseRelation: String,
+      filterPredicates: Seq[String]
+  ): Array[String] = {
+    val col = partitionColumn.get
+    val lower = lowerBound.get
+    val upper = upperBound.get
+    val numParts = numPartitions.get
+
+    val stride = (BigDecimal(upper) - BigDecimal(lower)) / BigDecimal(numParts)
+
+    (0 until numParts).map { i =>
+      val partitionPredicate = if (i == 0) {
+        val bound = (BigDecimal(lower) + stride).toLong
+        s"($col < $bound OR $col IS NULL)"
+      } else if (i == numParts - 1) {
+        val bound = (BigDecimal(lower) + stride * i).toLong
+        s"$col >= $bound"
+      } else {
+        val lBound = (BigDecimal(lower) + stride * i).toLong
+        val uBound = (BigDecimal(lower) + stride * (i + 1)).toLong
+        s"$col >= $lBound AND $col < $uBound"
+      }
+
+      val allPredicates = Seq(partitionPredicate) ++ filterPredicates
+      val whereClause = " WHERE " + allPredicates.mkString(" AND ")
+
+      s"SELECT $selectClause FROM $baseRelation$whereClause"
+    }.toArray
   }
 
   private def inferSchemaFromQuery(schemaQuery: String): StructType = {

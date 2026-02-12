@@ -12,7 +12,8 @@ A Spark DataSource V2 connector for [Apache Arrow ADBC](https://arrow.apache.org
 - **Limit pushdown** — pushes `LIMIT` down to the database
 - **Top-N pushdown** — pushes `ORDER BY ... LIMIT N` down to the database
 - **SQL dialect support** — generates dialect-specific SQL for PostgreSQL, SQLite, and MSSQL (auto-detected from `jni.driver` or set explicitly via `dialect` option)
-- **Works with any ADBC driver** — PostgreSQL, SQLite, MSSQL, Flight SQL, Snowflake, DuckDB, etc.
+- **Partitioned reads** — split reads across multiple Spark partitions by a numeric column for parallel data ingestion
+- **Works with any ADBC driver** — PostgreSQL, SQLite, MSSQL, DuckDB, Flight SQL, Snowflake, etc.
 
 ## Usage
 
@@ -34,7 +35,22 @@ val df = spark.read
   .option("uri", "postgresql://user:pass@localhost:5432/mydb")
   .option("query", "SELECT id, name FROM my_table WHERE active = true")
   .load()
+
+// Partitioned read (parallel ingestion across 8 tasks)
+val df = spark.read
+  .format("com.tokoko.spark.adbc")
+  .option("driver", "org.apache.arrow.adbc.driver.jni.JniDriverFactory")
+  .option("jni.driver", "postgresql")
+  .option("uri", "postgresql://user:pass@localhost:5432/mydb")
+  .option("dbtable", "my_table")
+  .option("partitionColumn", "id")
+  .option("lowerBound", "0")
+  .option("upperBound", "1000000")
+  .option("numPartitions", "8")
+  .load()
 ```
+
+`lowerBound` and `upperBound` are used to compute the stride for range splitting — they do not filter data. Rows outside the specified range are still read (they land in the first or last partition).
 
 ## Benchmarks
 
