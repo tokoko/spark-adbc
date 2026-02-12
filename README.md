@@ -6,14 +6,13 @@ A Spark DataSource V2 connector for [Apache Arrow ADBC](https://arrow.apache.org
 
 - **Columnar data transfer** — reads data as Arrow columnar batches, enabling zero-copy integration with Spark's columnar execution engine
 - **Read support** — read via `dbtable` or custom `query`
-- **Predicate pushdown** — pushes filter expressions down to the database
 - **Column pruning** — only fetches the columns Spark actually needs
-- **Aggregate pushdown** — pushes `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `GROUP BY` down to the database
+- **Filter pushdown** — pushes filter expressions down to the database (equality, comparison, null checks, `IN`, string `LIKE` patterns, `AND`/`OR`/`NOT`)
+- **Aggregate pushdown** — pushes `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (including `DISTINCT` variants) and `GROUP BY` down to the database
 - **Limit pushdown** — pushes `LIMIT` down to the database
 - **Top-N pushdown** — pushes `ORDER BY ... LIMIT N` down to the database
-- **Works with any ADBC driver** — PostgreSQL, SQLite, Flight SQL, Snowflake, DuckDB, etc.
-
-> **Note:** Pushdown operations generate standard SQL syntax (e.g. `LIMIT`, `ORDER BY`). Some SQL dialects may not support all generated clauses, in which case those pushdowns will still work at the Spark level but won't be offloaded to the database.
+- **SQL dialect support** — generates dialect-specific SQL for PostgreSQL, SQLite, and MSSQL (auto-detected from `jni.driver` or set explicitly via `dialect` option)
+- **Works with any ADBC driver** — PostgreSQL, SQLite, MSSQL, Flight SQL, Snowflake, DuckDB, etc.
 
 ## Usage
 

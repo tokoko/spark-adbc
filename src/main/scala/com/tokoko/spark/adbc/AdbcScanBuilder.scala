@@ -1,17 +1,23 @@
 package com.tokoko.spark.adbc
 
+import org.apache.arrow.adbc.drivermanager.AdbcDriverManager
+import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.sql.connector.expressions.{NamedReference, SortDirection, NullOrdering, SortOrder}
 import org.apache.spark.sql.connector.expressions.aggregate._
 import org.apache.spark.sql.connector.read.{Scan, ScanBuilder, SupportsPushDownAggregates, SupportsPushDownFilters, SupportsPushDownLimit, SupportsPushDownRequiredColumns, SupportsPushDownTopN}
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{ByteType, ShortType, IntegerType, FloatType, DoubleType, LongType, StructField, StructType}
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.ArrowUtilsExtended
+
+import scala.jdk.CollectionConverters._
 
 class AdbcScanBuilder(
     schema: StructType,
     driver: String,
     params: Map[String, String],
     dbtable: Option[String],
-    query: Option[String]
+    query: Option[String],
+    dialect: SqlDialect = DefaultDialect
 ) extends ScanBuilder
   with SupportsPushDownRequiredColumns
   with SupportsPushDownFilters
@@ -86,7 +92,7 @@ class AdbcScanBuilder(
       " WHERE " + pushedFilterArray.map(FilterConverter.convert).mkString(" AND ")
     } else ""
 
-    val (selectClause, groupByClause, outputSchema) = pushedAggregation match {
+    val (selectClause, groupByClause) = pushedAggregation match {
       case Some(agg) =>
         val groupByCols = agg.groupByExpressions().map {
           case ref: NamedReference => ref.fieldNames().head
@@ -96,24 +102,51 @@ class AdbcScanBuilder(
         val groupBy = if (groupByCols.nonEmpty) {
           " GROUP BY " + groupByCols.mkString(", ")
         } else ""
-        (select, groupBy, buildAggregateSchema(agg))
+        (select, groupBy)
 
       case None =>
         val cols = if (prunedSchema.fields.nonEmpty) {
           prunedSchema.fields.map(_.name).mkString(", ")
         } else "*"
-        (cols, "", prunedSchema)
+        (cols, "")
     }
 
     val orderByClause = if (pushedOrders.nonEmpty) {
       " ORDER BY " + pushedOrders.map(convertSortOrder).mkString(", ")
     } else ""
 
-    val limitClause = pushedLimit.map(l => s" LIMIT $l").getOrElse("")
+    val topPrefix = dialect.selectPrefix(pushedLimit)
+    val limitClause = dialect.limitSuffix(pushedLimit)
 
-    val finalQuery = s"SELECT $selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause"
+    val finalQuery = s"SELECT $topPrefix$selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause"
+
+    val outputSchema = if (pushedAggregation.isDefined) {
+      inferSchemaFromQuery(dialect.schemaInferenceQuery(selectClause, baseRelation, groupByClause))
+    } else {
+      prunedSchema
+    }
 
     new AdbcScan(driver, outputSchema, params, finalQuery)
+  }
+
+  private def inferSchemaFromQuery(schemaQuery: String): StructType = {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val parameters: java.util.Map[String, Object] = params.view.mapValues(v => v: Object).toMap.asJava
+    val database = AdbcDriverManager.getInstance().connect(driver, allocator, parameters)
+    try {
+      val conn = database.connect()
+      try {
+        val stmt = conn.createStatement()
+        try {
+          stmt.setSqlQuery(schemaQuery)
+          val result = stmt.executeQuery()
+          try {
+            val arrowSchema = result.getReader.getVectorSchemaRoot.getSchema
+            ArrowUtilsExtended.fromArrowSchema(arrowSchema)
+          } finally result.close()
+        } finally stmt.close()
+      } finally conn.close()
+    } finally database.close()
   }
 
   private def columnName(expr: org.apache.spark.sql.connector.expressions.Expression): String = {
@@ -132,44 +165,12 @@ class AdbcScanBuilder(
     case a: Avg => s"AVG(${columnName(a.column())})"
   }
 
-  private def buildAggregateSchema(agg: Aggregation): StructType = {
-    val groupByFields = agg.groupByExpressions().map {
-      case ref: NamedReference => schema(ref.fieldNames().head)
-    }
-    val aggFields = agg.aggregateExpressions().map {
-      case _: CountStar => StructField("count(*)", LongType, nullable = false)
-      case c: Count =>
-        StructField(s"count(${columnName(c.column())})", LongType, nullable = false)
-      case s: Sum =>
-        val col = columnName(s.column())
-        val sumType = schema(col).dataType match {
-          case ByteType | ShortType | IntegerType | LongType => LongType
-          case FloatType | DoubleType => DoubleType
-          case other => other
-        }
-        StructField(s"sum($col)", sumType)
-      case m: Min =>
-        val col = columnName(m.column())
-        StructField(s"min($col)", schema(col).dataType)
-      case m: Max =>
-        val col = columnName(m.column())
-        StructField(s"max($col)", schema(col).dataType)
-      case a: Avg =>
-        StructField(s"avg(${columnName(a.column())})", DoubleType)
-    }
-    StructType(groupByFields ++ aggFields)
-  }
-
   private def convertSortOrder(order: SortOrder): String = {
     val name = order.expression().asInstanceOf[NamedReference].fieldNames().mkString(".")
     val dir = order.direction() match {
       case SortDirection.ASCENDING => "ASC"
       case SortDirection.DESCENDING => "DESC"
     }
-    val nulls = order.nullOrdering() match {
-      case NullOrdering.NULLS_FIRST => " NULLS FIRST"
-      case NullOrdering.NULLS_LAST => " NULLS LAST"
-    }
-    s"$name $dir$nulls"
+    dialect.formatSortOrder(name, dir, order.nullOrdering())
   }
 }

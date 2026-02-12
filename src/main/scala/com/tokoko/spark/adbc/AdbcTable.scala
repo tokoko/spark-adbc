@@ -16,7 +16,7 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
 
   override def capabilities(): util.Set[TableCapability] = Set(TableCapability.BATCH_READ, TableCapability.BATCH_WRITE).asJava
 
-  private val reservedKeys = Set("driver", "dbtable", "query")
+  private val reservedKeys = Set("driver", "dbtable", "query", "dialect")
 
   private def extractParams(options: java.util.Map[String, String]): Map[String, String] = {
     options.asScala.filterKeys(k => !reservedKeys.contains(k.toLowerCase)).toMap
@@ -26,9 +26,10 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
     val dbtable = Option(options.get("dbtable"))
     val query = Option(options.get("query"))
     val driver = options.get("driver")
+    val dialect = SqlDialect.fromOptions(Option(options.get("dialect")), Option(options.get("jni.driver")))
     val params = extractParams(options)
 
-    new AdbcScanBuilder(schema, driver, params, dbtable, query)
+    new AdbcScanBuilder(schema, driver, params, dbtable, query, dialect)
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
