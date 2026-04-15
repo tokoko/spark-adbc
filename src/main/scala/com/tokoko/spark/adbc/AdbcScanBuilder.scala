@@ -17,7 +17,7 @@ class AdbcScanBuilder(
     params: Map[String, String],
     dbtable: Option[String],
     query: Option[String],
-    dialect: SqlDialect = DefaultDialect,
+    dialect: SqlDialect = SqlDialect.Default,
     partitionColumn: Option[String] = None,
     lowerBound: Option[Long] = None,
     upperBound: Option[Long] = None,
@@ -59,14 +59,26 @@ class AdbcScanBuilder(
 
   override def pushTopN(orders: Array[SortOrder], limit: Int): Boolean = {
     if (isPartitioned) return false
-    val supported = orders.forall(_.expression().isInstanceOf[NamedReference])
-    if (supported) {
-      pushedOrders = orders
-      pushedLimit = Some(limit)
-      true
-    } else {
-      false
+    if (!orders.forall(_.expression().isInstanceOf[NamedReference])) return false
+    if (dialect.nullsOrderingSyntax == NullsOrderingSyntax.Unsupported) {
+      // Dialects without NULLS FIRST/LAST syntax (MySQL, MSSQL) treat NULLs as
+      // smallest values: default is NULLS_FIRST for ASC, NULLS_LAST for DESC
+      // (matches Spark's default). Reject the pushdown if Spark asked for the
+      // opposite and the sort column can actually contain NULLs.
+      val needsExplicitNulls = orders.exists { o =>
+        val name = o.expression().asInstanceOf[NamedReference].fieldNames().head
+        val nullable = schema.fields.find(_.name == name).forall(_.nullable)
+        val default = o.direction() match {
+          case SortDirection.ASCENDING => NullOrdering.NULLS_FIRST
+          case SortDirection.DESCENDING => NullOrdering.NULLS_LAST
+        }
+        nullable && o.nullOrdering() != default
+      }
+      if (needsExplicitNulls) return false
     }
+    pushedOrders = orders
+    pushedLimit = Some(limit)
+    true
   }
 
   override def pushAggregation(aggregation: Aggregation): Boolean = {
@@ -97,14 +109,16 @@ class AdbcScanBuilder(
       case None => s"(${query.get}) AS T"
     }
 
-    val filterPredicates = pushedFilterArray.map(FilterConverter.convert).toSeq
+    val filterPredicates = pushedFilterArray.map(f => FilterConverter.convert(f, dialect)).toSeq
 
     val (selectClause, groupByClause) = pushedAggregation match {
       case Some(agg) =>
         val groupByCols = agg.groupByExpressions().map {
-          case ref: NamedReference => ref.fieldNames().head
+          case ref: NamedReference => SqlBuilder.quoteId(dialect, ref.fieldNames().head)
         }
-        val aggCols = agg.aggregateExpressions().map(convertAggFunc)
+        val aggCols = agg.aggregateExpressions().zipWithIndex.map {
+          case (a, i) => s"${convertAggFunc(a)} AS agg_$i"
+        }
         val select = (groupByCols ++ aggCols).mkString(", ")
         val groupBy = if (groupByCols.nonEmpty) {
           " GROUP BY " + groupByCols.mkString(", ")
@@ -113,17 +127,18 @@ class AdbcScanBuilder(
 
       case None =>
         val cols = if (prunedSchema.fields.nonEmpty) {
-          prunedSchema.fields.map(_.name).mkString(", ")
+          prunedSchema.fields.map(f => SqlBuilder.quoteId(dialect, f.name)).mkString(", ")
         } else "*"
         (cols, "")
     }
 
     val orderByClause = if (pushedOrders.nonEmpty) {
       " ORDER BY " + pushedOrders.map(convertSortOrder).mkString(", ")
+    } else if (pushedLimit.isDefined && SqlBuilder.requiresOrderByForLimit(dialect)) {
+      " ORDER BY (SELECT NULL)"
     } else ""
 
-    val topPrefix = dialect.selectPrefix(pushedLimit)
-    val limitClause = dialect.limitSuffix(pushedLimit)
+    val limitClause = SqlBuilder.limitClause(dialect, pushedLimit)
 
     val queries: Array[String] = if (isPartitioned) {
       generatePartitionQueries(selectClause, baseRelation, filterPredicates)
@@ -131,11 +146,11 @@ class AdbcScanBuilder(
       val whereClause = if (filterPredicates.nonEmpty) {
         " WHERE " + filterPredicates.mkString(" AND ")
       } else ""
-      Array(s"SELECT $topPrefix$selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause")
+      Array(s"SELECT $selectClause FROM $baseRelation$whereClause$groupByClause$orderByClause$limitClause")
     }
 
     val outputSchema = if (pushedAggregation.isDefined) {
-      inferSchemaFromQuery(dialect.schemaInferenceQuery(selectClause, baseRelation, groupByClause))
+      inferSchema(s"SELECT $selectClause FROM $baseRelation$groupByClause")
     } else {
       prunedSchema
     }
@@ -148,10 +163,15 @@ class AdbcScanBuilder(
       baseRelation: String,
       filterPredicates: Seq[String]
   ): Array[String] = {
-    val col = partitionColumn.get
+    val col = SqlBuilder.quoteId(dialect, partitionColumn.get)
     val lower = lowerBound.get
     val upper = upperBound.get
     val numParts = numPartitions.get
+
+    if (numParts == 1) {
+      val whereClause = if (filterPredicates.nonEmpty) " WHERE " + filterPredicates.mkString(" AND ") else ""
+      return Array(s"SELECT $selectClause FROM $baseRelation$whereClause")
+    }
 
     val stride = (BigDecimal(upper) - BigDecimal(lower)) / BigDecimal(numParts)
 
@@ -175,28 +195,21 @@ class AdbcScanBuilder(
     }.toArray
   }
 
-  private def inferSchemaFromQuery(schemaQuery: String): StructType = {
+  private def inferSchema(query: String): StructType = {
     val allocator = new RootAllocator(Long.MaxValue)
-    val parameters: java.util.Map[String, Object] = params.view.mapValues(v => v: Object).toMap.asJava
-    val database = AdbcDriverManager.getInstance().connect(driver, allocator, parameters)
     try {
-      val conn = database.connect()
+      val parameters: java.util.Map[String, Object] = params.view.mapValues(v => v: Object).toMap.asJava
+      val database = AdbcDriverManager.getInstance().connect(driver, allocator, parameters)
       try {
-        val stmt = conn.createStatement()
-        try {
-          stmt.setSqlQuery(schemaQuery)
-          val result = stmt.executeQuery()
-          try {
-            val arrowSchema = result.getReader.getVectorSchemaRoot.getSchema
-            ArrowUtilsExtended.fromArrowSchema(arrowSchema)
-          } finally result.close()
-        } finally stmt.close()
-      } finally conn.close()
-    } finally database.close()
+        val conn = database.connect()
+        try ArrowUtilsExtended.fromArrowSchema(SchemaInference.run(conn, query))
+        finally conn.close()
+      } finally database.close()
+    } finally allocator.close()
   }
 
   private def columnName(expr: org.apache.spark.sql.connector.expressions.Expression): String = {
-    expr.asInstanceOf[NamedReference].fieldNames().head
+    SqlBuilder.quoteId(dialect, expr.asInstanceOf[NamedReference].fieldNames().head)
   }
 
   private def convertAggFunc(func: AggregateFunc): String = func match {
@@ -212,11 +225,11 @@ class AdbcScanBuilder(
   }
 
   private def convertSortOrder(order: SortOrder): String = {
-    val name = order.expression().asInstanceOf[NamedReference].fieldNames().mkString(".")
+    val name = SqlBuilder.quoteId(dialect, order.expression().asInstanceOf[NamedReference].fieldNames().head)
     val dir = order.direction() match {
       case SortDirection.ASCENDING => "ASC"
       case SortDirection.DESCENDING => "DESC"
     }
-    dialect.formatSortOrder(name, dir, order.nullOrdering())
+    SqlBuilder.formatSortOrder(dialect, name, dir, order.nullOrdering())
   }
 }

@@ -3,7 +3,7 @@ package com.tokoko.spark.adbc
 import org.apache.spark.sql.connector.catalog.{SupportsRead, SupportsWrite, Table, TableCapability}
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
-import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import scala.jdk.CollectionConverters._
@@ -60,7 +60,8 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
     val table = info.options().get("dbtable")
     val driver = info.options().get("driver")
     val params = extractParams(info.options())
+    val timeZone = org.apache.spark.sql.SparkSession.active.sessionState.conf.sessionLocalTimeZone
 
-    new AdbcWriteBuilder(schema, driver, params, table)
+    new AdbcWriteBuilder(schema, driver, params, table, timeZone)
   }
 }

@@ -1,7 +1,7 @@
 ThisBuild / scalaVersion := "2.13.17"
 
 val sparkVersion = "4.1.1"
-val adbcVersion = "0.22.0"
+val adbcVersion = "0.23.0"
 val arrowVersion = "18.3.0"
 
 val javaOpens = Seq(
@@ -31,7 +31,6 @@ lazy val root = (project in file("."))
       "org.apache.spark" %% "spark-sql" % sparkVersion,
       "org.apache.arrow.adbc" % "adbc-driver-jni" % adbcVersion % Test,
       "org.apache.arrow" % "arrow-memory-netty" % arrowVersion % Test,
-      "org.xerial" % "sqlite-jdbc" % "3.47.2.0" % Test,
       "org.apache.datafusion" %% "comet-spark-spark4.0" % "0.13.0" % Test,
       "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % Test
     ),
@@ -49,12 +48,13 @@ lazy val driverTests = (project in file("driver-tests"))
       "org.apache.spark" %% "spark-sql" % sparkVersion,
       "org.apache.arrow.adbc" % "adbc-driver-jni" % adbcVersion % Test,
       "org.apache.arrow" % "arrow-memory-netty" % arrowVersion % Test,
-      "org.xerial" % "sqlite-jdbc" % "3.47.2.0" % Test,
       "org.duckdb" % "duckdb_jdbc" % "1.4.4.0" % Test,
       "org.postgresql" % "postgresql" % "42.7.4" % Test,
       "org.testcontainers" % "postgresql" % "1.21.4" % Test,
       "org.testcontainers" % "mssqlserver" % "1.21.4" % Test,
       "com.microsoft.sqlserver" % "mssql-jdbc" % "12.8.1.jre11" % Test,
+      "org.testcontainers" % "mysql" % "1.21.4" % Test,
+      "com.mysql" % "mysql-connector-j" % "9.1.0" % Test,
       "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % Test
     ),
     Test / fork := true,

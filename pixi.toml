@@ -6,3 +6,6 @@ platforms = ["linux-64"]
 [dependencies]
 openjdk = "17.*"
 sbt = "*"
+
+[tasks]
+test-drivers = "sbt driverTests/test"

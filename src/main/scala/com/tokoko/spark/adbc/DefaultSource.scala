@@ -15,15 +15,10 @@ class DefaultSource extends TableProvider{
   private val reservedKeys = Set("driver", "dbtable", "query", "dialect",
     "partitioncolumn", "lowerbound", "upperbound", "numpartitions")
 
-  // TODO runs a query to determine schema until ADBC supports more direct method for schema inference
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
-    val dialect = SqlDialect.fromOptions(Option(options.get("dialect")), Option(options.get("jni.driver")))
-
     val baseRelation = Option(options.get("dbtable")).getOrElse {
       s"(${options.get("query")}) AS T"
     }
-    val query = dialect.schemaInferenceQuery("*", baseRelation, "")
-
     val driver = options.get("driver")
 
     val parameters: java.util.Map[String, Object] = options.asScala
@@ -31,22 +26,14 @@ class DefaultSource extends TableProvider{
       .mapValues(v => v: Object).toMap.asJava
 
     val allocator = new RootAllocator(Long.MaxValue)
-    val database = AdbcDriverManager.getInstance()
-      .connect(driver, allocator, parameters)
     try {
-      val adbcConn = database.connect()
+      val database = AdbcDriverManager.getInstance().connect(driver, allocator, parameters)
       try {
-        val statement = adbcConn.createStatement()
-        try {
-          statement.setSqlQuery(query)
-          val result = statement.executeQuery()
-          try {
-            val schema = result.getReader.getVectorSchemaRoot.getSchema
-            ArrowUtilsExtended.fromArrowSchema(schema)
-          } finally result.close()
-        } finally statement.close()
-      } finally adbcConn.close()
-    } finally database.close()
+        val adbcConn = database.connect()
+        try ArrowUtilsExtended.fromArrowSchema(SchemaInference.run(adbcConn, s"SELECT * FROM $baseRelation"))
+        finally adbcConn.close()
+      } finally database.close()
+    } finally allocator.close()
   }
 
   override def getTable(schema: StructType, partitioning: Array[Transform], properties: util.Map[String, String]): Table = {
