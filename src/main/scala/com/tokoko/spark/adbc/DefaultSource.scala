@@ -13,7 +13,7 @@ import scala.jdk.CollectionConverters._
 class DefaultSource extends TableProvider{
 
   private val reservedKeys = Set("driver", "dbtable", "query", "dialect",
-    "partitioncolumn", "lowerbound", "upperbound", "numpartitions")
+    "partitioncolumn", "lowerbound", "upperbound", "numpartitions", "driverpartitioning")
 
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val baseRelation = Option(options.get("dbtable")).getOrElse {

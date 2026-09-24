@@ -13,6 +13,7 @@ A Spark DataSource V2 connector for [Apache Arrow ADBC](https://arrow.apache.org
 - **Top-N pushdown** — pushes `ORDER BY ... LIMIT N` down to the database
 - **SQL dialect support** — generates dialect-specific SQL for PostgreSQL, SQLite, and MSSQL (auto-detected from `jni.driver` or set explicitly via `dialect` option)
 - **Partitioned reads** — split reads across multiple Spark partitions by a numeric column for parallel data ingestion
+- **Driver-driven partitioning** — lets drivers that implement ADBC `executePartitioned` (e.g. Flight SQL backends) split query results across Spark partitions
 - **Works with any ADBC driver** — PostgreSQL, SQLite, MSSQL, DuckDB, Flight SQL, Snowflake, etc.
 
 ## Usage
@@ -51,6 +52,20 @@ val df = spark.read
 ```
 
 `lowerBound` and `upperBound` are used to compute the stride for range splitting — they do not filter data. Rows outside the specified range are still read (they land in the first or last partition).
+
+### Driver-driven partitioning
+
+The `driverPartitioning` option controls whether each query is run with ADBC `executePartitioned`, so the driver splits the result into partition descriptors, and each descriptor becomes its own Spark partition:
+
+- `auto` (default without range options): use `executePartitioned` when the driver implements it, otherwise run a plain query
+- `required`: fail if the driver doesn't implement `executePartitioned`
+- `none` (default with range options): always run plain queries
+
+It works independently of range partitioning. If you set both, each of the `numPartitions` range queries is split again by the driver. In that case all range queries run on the database while Spark plans the job (not as tasks start), and the server keeps every result until executors read it.
+
+With driver partitioning, aggregates are fully pushed down. Limit and Top-N are pushed down too, and Spark re-applies them because the order across partitions isn't guaranteed. Partition descriptors are created once per planned query and re-read on task retries, so the driver's descriptors must be readable more than once.
+
+> The JNI driver (`JniDriverFactory`) doesn't implement `executePartitioned` as of ADBC 0.23, so with it `auto` always falls back to plain queries.
 
 ## Benchmarks
 

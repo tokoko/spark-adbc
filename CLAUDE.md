@@ -35,7 +35,8 @@ src/main/scala/
     AdbcBatch.scala             # Read path: batch/partition planning
     AdbcPartitionReaderFactory.scala
     AdbcPartitionReader.scala   # Read path: executes ADBC query
-    AdbcPartition.scala         # Partition descriptor
+    AdbcPartition.scala         # Partition types: query or driver descriptor
+    DriverPartitioning.scala    # driverPartitioning option (none/auto/required)
     AdbcWriteBuilder.scala      # Write path: write builder
     AdbcWrite.scala             # Write path: write
     AdbcBatchWrite.scala        # Write path: batch write
@@ -84,6 +85,10 @@ The connector supports: column pruning, filter pushdown, limit pushdown, topN pu
 ### Client-Driven Partitioning
 
 Range-based partitioning splits reads across N Spark partitions using a numeric column. Options: `partitionColumn`, `lowerBound`, `upperBound`, `numPartitions` (all four required together). Follows the same stride-based approach as Spark's JDBC connector. When partitioning is active, aggregation/limit/topN pushdowns are disabled (Spark handles them after collecting all partitions).
+
+### Driver-Driven Partitioning
+
+Orthogonal to range partitioning: the `driverPartitioning` option (`auto` | `required` | `none`) makes `AdbcBatch.planInputPartitions` call `executePartitioned` for each generated query and flatten the returned descriptors into `AdbcDescriptorPartition`s (read on executors via `AdbcConnection.readPartition`). Plain queries become `AdbcQueryPartition`s. Defaults to `auto` without range options and `none` with them; `auto` falls back to plain queries on `NOT_IMPLEMENTED`. With it enabled, limit/topN are reported as partially pushed. The JNI driver doesn't implement it yet; `AdbcDriverPartitioningTest` uses a fake wrapping driver.
 
 ## Code Conventions
 

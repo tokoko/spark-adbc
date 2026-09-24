@@ -21,7 +21,8 @@ class AdbcScanBuilder(
     partitionColumn: Option[String] = None,
     lowerBound: Option[Long] = None,
     upperBound: Option[Long] = None,
-    numPartitions: Option[Int] = None
+    numPartitions: Option[Int] = None,
+    driverPartitioning: DriverPartitioning = DriverPartitioning.Disabled
 ) extends ScanBuilder
   with SupportsPushDownRequiredColumns
   with SupportsPushDownFilters
@@ -29,7 +30,8 @@ class AdbcScanBuilder(
   with SupportsPushDownTopN
   with SupportsPushDownAggregates {
 
-  private val isPartitioned: Boolean = partitionColumn.isDefined
+  // Range queries each see only a slice of the rows, so limit/topN/aggregates can't be pushed.
+  private val isRangePartitioned: Boolean = partitionColumn.isDefined
 
   private var prunedSchema: StructType = schema
   private var pushedFilterArray: Array[Filter] = Array.empty
@@ -49,16 +51,18 @@ class AdbcScanBuilder(
 
   override def pushedFilters(): Array[Filter] = pushedFilterArray
 
-  override def isPartiallyPushed(): Boolean = false
+  // Driver partitions are slices of one server-side result: a pushed limit/topN is applied
+  // across all of them together, but their read order isn't guaranteed, so Spark re-applies it.
+  override def isPartiallyPushed(): Boolean = driverPartitioning != DriverPartitioning.Disabled
 
   override def pushLimit(limit: Int): Boolean = {
-    if (isPartitioned) return false
+    if (isRangePartitioned) return false
     pushedLimit = Some(limit)
     true
   }
 
   override def pushTopN(orders: Array[SortOrder], limit: Int): Boolean = {
-    if (isPartitioned) return false
+    if (isRangePartitioned) return false
     if (!orders.forall(_.expression().isInstanceOf[NamedReference])) return false
     if (dialect.nullsOrderingSyntax == NullsOrderingSyntax.Unsupported) {
       // Dialects without NULLS FIRST/LAST syntax (MySQL, MSSQL) treat NULLs as
@@ -82,7 +86,7 @@ class AdbcScanBuilder(
   }
 
   override def pushAggregation(aggregation: Aggregation): Boolean = {
-    if (isPartitioned) return false
+    if (isRangePartitioned) return false
     val groupBySupported = aggregation.groupByExpressions().forall(_.isInstanceOf[NamedReference])
     if (!groupBySupported) return false
 
@@ -140,7 +144,7 @@ class AdbcScanBuilder(
 
     val limitClause = SqlBuilder.limitClause(dialect, pushedLimit)
 
-    val queries: Array[String] = if (isPartitioned) {
+    val queries: Array[String] = if (isRangePartitioned) {
       generatePartitionQueries(selectClause, baseRelation, filterPredicates)
     } else {
       val whereClause = if (filterPredicates.nonEmpty) {
@@ -155,7 +159,7 @@ class AdbcScanBuilder(
       prunedSchema
     }
 
-    new AdbcScan(driver, outputSchema, params, queries)
+    new AdbcScan(driver, outputSchema, params, queries, driverPartitioning)
   }
 
   private def generatePartitionQueries(
