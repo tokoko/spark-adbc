@@ -46,11 +46,16 @@ The read path maps directly to ADBC's columnar streaming model:
 
 1. `DefaultSource.inferSchema` opens an ADBC connection and calls `AdbcStatement.executeSchema(SELECT * FROM <relation>)` to retrieve the Arrow schema without executing the query. Falls back to `executeQuery` on `SELECT ... WHERE 1=0` for drivers that don't implement `executeSchema`.
 2. `AdbcScanBuilder` accepts Spark pushdowns (`pruneColumns`, `pushFilters`, `pushLimit`, `pushTopN`, `pushAggregation`) and compiles them into SQL. Aggregate expressions are emitted with explicit aliases (`COUNT(*) AS agg_0`) so derived-table wrapping works uniformly across dialects.
-3. At planning time, the connector decides between:
-   - **Server-driven partitioning** via `AdbcStatement.executePartitions` — driver hands back opaque partition descriptors, one per Spark task. Used when supported (Flight SQL backends today; broader adoption expected).
-   - **Client-driven partitioning** — stride-based split on a numeric column, mirroring the JDBC connector's `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` options. Generates N parallel `SELECT ... WHERE col BETWEEN ...` queries.
-   - **Single-partition** — default for small tables.
-4. `AdbcPartitionReader` executes its query and consumes the Arrow record batch stream. It exposes itself as a `PartitionReader[ColumnarBatch]`, wrapping each Arrow batch as a Spark `ColumnarBatch` via `ArrowColumnVector`. Spark's row-based operators consume this via the DSv2 columnar-to-row adapter (no per-cell JDBC-style dispatch); vectorized engines like Comet and Gluten consume it directly.
+3. Parallelism has two independent parts, which can be combined:
+   - **Client-driven partitioning** decides *which queries run*. It does a stride-based split on a numeric column, like the JDBC connector's `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` options, and produces N range queries (`col >= lo AND col < hi`, with NULLs in the first partition). Without these options there is one query.
+   - **Driver-driven partitioning** decides *how each query's result is read*. It is controlled by `driverPartitioning` = `auto` | `required` | `none`. The Spark driver calls `AdbcStatement.executePartitioned` for each query, and the ADBC driver returns opaque partition descriptors. Each descriptor becomes one Spark task, which reads it through `AdbcConnection.readPartition`. Flight SQL backends support this today, and wider adoption is expected. `auto` falls back to plain queries when the driver reports `NOT_IMPLEMENTED`.
+
+   With both enabled, every range query is split again by the driver, giving N×M Spark partitions. This covers servers that return a single endpoint, or fewer than the user wants: range splitting guarantees a minimum level of parallelism, and driver splitting adds more on top. `driverPartitioning` defaults to `auto` when no range options are given and to `none` when they are, so combining the two is a deliberate choice.
+
+   **Where descriptors are produced.** `executePartitioned` is called in `Batch.planInputPartitions()`, not in `ScanBuilder.build()`. `build()` runs during logical optimization, where executing queries would make `explain()` and schema analysis hit the database. `planInputPartitions()` is called lazily by `BatchScanExec` when the input RDD is built on the Spark driver, and the connector caches its result so each planned scan executes its queries exactly once. When there are several range queries, the first one is sent alone as a probe (an unsupported driver costs one round-trip), and the rest run concurrently, one connection per thread. Descriptors are copied into byte arrays so Spark can serialize them into tasks. The Spark driver closes its connection as soon as planning is done: the ADBC spec says descriptors can be read from other connections and processes.
+
+   **Pushdown interaction.** Range queries each see only a slice of the rows, so limit, Top-N and aggregate pushdown are disabled under client-driven partitioning. Driver partitions are slices of *one* server-side result, so aggregates are fully pushed. Limit and Top-N are pushed too, but reported as partially pushed (`isPartiallyPushed = true`): order across descriptors isn't guaranteed (Flight's `ordered` flag isn't exposed through ADBC), so Spark re-applies them to the already-reduced result.
+4. `AdbcPartitionReader` executes its query, or reads its partition descriptor, and consumes the Arrow record batch stream. It exposes itself as a `PartitionReader[ColumnarBatch]`, wrapping each Arrow batch as a Spark `ColumnarBatch` via `ArrowColumnVector`. Spark's row-based operators consume this via the DSv2 columnar-to-row adapter (no per-cell JDBC-style dispatch); vectorized engines like Comet and Gluten consume it directly.
 
 **Why this succeeds:**
 - Columnar data at the driver boundary eliminates row-shredding for columnar-protocol backends
@@ -120,6 +125,8 @@ Every driver populates `VENDOR_NAME` (code 0), so the vendor-keyed preset path w
 - **Native dependencies** — ADBC drivers are typically native (C/C++/Go); the JNI driver introduces platform-specific packaging concerns that pure-Java JDBC drivers don't have. Mitigation: make ADBC an optional data source; users opt in.
 - **Type mapping edge cases** — Arrow-to-Spark type mapping already exists (used by pandas UDFs), but some Arrow types (extension types, large unions) have no Spark equivalent and need defined fallbacks.
 - **Write semantics expectations** — users moving from other connectors may expect cross-task atomicity. Mitigation: clearly document at-least-once semantics; defer stronger guarantees to the ADBC-spec level.
+- **Driver-partitioned reads execute early and are re-read** — descriptors are produced while Spark plans the job, so with range + driver partitioning all N queries start on the database at once, and the server keeps their results until executors read them. Descriptors are also read again on task retries, speculative execution, and repeated actions on the same `Dataset` (which reuses its executed plan), so drivers must allow a descriptor to be read more than once and must keep it valid for a reasonable time. Mitigation: document these requirements for driver authors and keep `driverPartitioning=none` available. Longer term, ADBC could expose descriptor expiry and ordering metadata (as Flight's `FlightEndpoint.expiration_time` and `FlightInfo.ordered` do).
+- **Uneven driver support for partitioned execution** — as of ADBC 0.23.0 the Java JNI bridge (`adbc-driver-jni`) does not implement `executePartitioned` or `readPartition`, so native drivers loaded through it (including the Go Flight SQL driver) always fall back to plain queries. The pure-Java Flight SQL driver implements it. Mitigation: `auto` falls back gracefully; closing the JNI gap is an upstream ADBC contribution.
 - **Spec evolution** — ADBC is still in pre-2.0; spec changes could affect the connector. Mitigation: pin to a spec version in the initial release; treat upgrades as Spark-version-scoped follow-ups.
 
 ## Q7. How long will it take?
@@ -158,7 +165,7 @@ spark.read
   .load()
 ```
 
-Configuration options mirror the JDBC data source where meaningful (`partitionColumn`, `lowerBound`, `upperBound`, `numPartitions`) and add ADBC-specific ones (`driver`, `uri`, optional `dialect`).
+Configuration options mirror the JDBC data source where meaningful (`partitionColumn`, `lowerBound`, `upperBound`, `numPartitions`) and add ADBC-specific ones (`driver`, `uri`, optional `dialect`, optional `driverPartitioning` = `auto` | `required` | `none`).
 
 ## Appendix B: Related work and prototype
 

@@ -17,7 +17,7 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
   override def capabilities(): util.Set[TableCapability] = Set(TableCapability.BATCH_READ, TableCapability.BATCH_WRITE).asJava
 
   private val reservedKeys = Set("driver", "dbtable", "query", "dialect",
-    "partitioncolumn", "lowerbound", "upperbound", "numpartitions")
+    "partitioncolumn", "lowerbound", "upperbound", "numpartitions", "driverpartitioning")
 
   private def extractParams(options: java.util.Map[String, String]): Map[String, String] = {
     options.asScala.filterKeys(k => !reservedKeys.contains(k.toLowerCase)).toMap
@@ -52,8 +52,11 @@ class AdbcTable(schema: StructType) extends Table with SupportsRead with Support
       )
     }
 
+    val driverPartitioning = DriverPartitioning.fromOption(
+      Option(options.get("driverPartitioning")), rangePartitioned = partitionColumn.isDefined)
+
     new AdbcScanBuilder(schema, driver, params, dbtable, query, dialect,
-      partitionColumn, partLowerBound, partUpperBound, partNumPartitions)
+      partitionColumn, partLowerBound, partUpperBound, partNumPartitions, driverPartitioning)
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {

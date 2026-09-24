@@ -12,7 +12,6 @@ class AdbcPartitionReaderFactory(driver: String, params: Map[String, String]) ex
   }
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
-    val adbcPartition = partition.asInstanceOf[AdbcPartition]
-    new AdbcPartitionReader(driver, params, adbcPartition.query)
+    new AdbcPartitionReader(driver, params, partition.asInstanceOf[AdbcPartition])
   }
 }

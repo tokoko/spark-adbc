@@ -6,9 +6,11 @@ import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, ColumnVector}
 
+import java.nio.ByteBuffer
+
 import scala.jdk.CollectionConverters._
 
-class AdbcPartitionReader(driver: String, params: Map[String, String], query: String) extends PartitionReader[ColumnarBatch] {
+class AdbcPartitionReader(driver: String, params: Map[String, String], partition: AdbcPartition) extends PartitionReader[ColumnarBatch] {
   private var queryExecuted = false
   private var allocator: RootAllocator = _
   private var database: org.apache.arrow.adbc.core.AdbcDatabase = _
@@ -26,10 +28,14 @@ class AdbcPartitionReader(driver: String, params: Map[String, String], query: St
 
       adbcConn = database.connect()
 
-      statement = adbcConn.createStatement()
-
-      statement.setSqlQuery(query)
-      batchReader = statement.executeQuery().getReader
+      batchReader = partition match {
+        case AdbcQueryPartition(query) =>
+          statement = adbcConn.createStatement()
+          statement.setSqlQuery(query)
+          statement.executeQuery().getReader
+        case AdbcDescriptorPartition(descriptor) =>
+          adbcConn.readPartition(ByteBuffer.wrap(descriptor))
+      }
       queryExecuted = true
     }
 
