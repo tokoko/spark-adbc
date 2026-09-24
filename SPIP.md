@@ -1,154 +1,68 @@
 # SPIP: ADBC Data Source for Apache Spark
 
-## Q1. What are you proposing?
+## Q1. What are you trying to do?
 
-A new first-party DataSource V2 connector in Apache Spark that uses Apache Arrow ADBC (Arrow Database Connectivity) — an API specification for database drivers that exposes query results as Arrow record batches — to read from and write to relational databases. ADBC is analogous to JDBC in that it is a client-side API standard; the underlying wire protocol varies per driver (Postgres wire protocol, Arrow Flight SQL, Snowflake's HTTP API, etc.). The connector would live alongside the existing JDBC data source (`spark.read.format("jdbc")`) as a higher-performance alternative for databases that ship ADBC drivers, targeting users today exposed to row-oriented JDBC serialization overhead on analytic workloads.
+Spark connects to most databases through JDBC, a standard Java interface for database drivers. JDBC passes data one row at a time, and Spark reads each value in a row separately. Many modern analytical databases store and send data in columns. So when Spark reads from them through JDBC, the data gets converted from columns to rows and then read value by value. On large reads, that conversion takes up much of the total time.
 
-## Q2. What problem is this proposal trying to solve?
+ADBC (Arrow Database Connectivity) is a newer standard for database drivers from the Apache Arrow project. ADBC drivers return results as batches of columns in Arrow format. Spark already uses Arrow for its Python integration.
 
-Spark's JDBC data source serializes every row through the JDBC `ResultSet` abstraction — one row at a time, one Java object per cell, with per-cell `ResultSet.getXxx` dispatch and type coercion. For analytic reads pulling tens of millions of rows from a database whose native protocol is columnar (Arrow Flight SQL, Snowflake's result format, BigQuery's Storage Read API, Postgres `COPY BINARY`, etc.), this row-at-a-time path dominates wall-clock time. Benchmarks on the existing `spark-adbc` prototype show 3–10× throughput improvements over JDBC on columnar-backend reads, with the margin widening on wider tables.
+We propose adding a built-in ADBC data source to Spark, next to the existing JDBC one. It would read and write through any ADBC driver and pass the column batches straight into Spark. This would make large analytical reads faster without changing how users write queries.
 
-Two distinct costs contribute:
+## Q2. What problem is this proposal NOT designed to solve?
 
-1. **Driver-boundary shredding.** Columnar-protocol backends have to decode their columnar payload into rows to fit the JDBC `ResultSet` interface. Work that was columnar upstream gets pointlessly row-ified at the driver.
-2. **Per-cell dispatch in Spark.** Even once data is row-based, building Spark's `InternalRow` via per-column `ResultSet.getXxx` calls, Java object boxing for nullable types, and type coercion is expensive relative to a bulk Arrow-to-Spark conversion of a whole batch.
-
-ADBC addresses both by delivering results as Arrow `RecordBatch` streams. The data source consumes batches directly:
-
-- For **Spark's row-based execution path**, Arrow batches convert to `InternalRow` in bulk (vectorized) without per-cell JDBC-style dispatch.
-- For **Spark's columnar scan path** (`PartitionReader[ColumnarBatch]`, used by vectorized execution engines like Comet and Gluten), the Arrow batch is wrapped as a `ColumnarBatch` with near-zero copy — the advantage compounds because downstream operators stay columnar.
-
-The current prototype uses the columnar path; both are viable and users with and without vectorized engines benefit.
+- **Replacing JDBC.** The ADBC data source complements the JDBC data source; it doesn't replace it. JDBC supports far more databases and has a mature ecosystem, and it stays unchanged: no deprecation and no behavior changes. ADBC gives users a second option for databases that ship ADBC drivers. The gains are largest on analytical reads from databases that already store or send data in columns.
+- **Atomic distributed writes in the first version.** The first version writes from each task independently, like Spark's JDBC writer does today. It doesn't guarantee that a whole job's writes succeed or fail together. That needs the partitioned bulk ingest API proposed in ADBC ([apache/arrow-adbc#4317](https://github.com/apache/arrow-adbc/pull/4317)), and will follow once it is merged.
+- **Structured Streaming.** The proposal covers batch reads and writes only.
 
 ## Q3. How is it done today, and what are the limits of current practice?
 
-**Today — Spark's stock JDBC connector:**
-- Row-oriented `ResultSet` → `InternalRow` conversion per row
-- One JDBC `PreparedStatement` per partition, row-batched `INSERT` writes
-- Rich pushdown support (filters, limit, topN, aggregates, columns) via `JdbcDialect` subclasses
-- Broad driver ecosystem but uniformly serializes through rows
+**Today.** Spark's JDBC data source is the general way to read from and write to databases. It supports many databases, and it can push column selection, filters, limits, Top-N and aggregates down to the database through `JdbcDialect` subclasses. Every read goes through the row-by-row JDBC `ResultSet` interface, and writes are batched `INSERT` statements.
 
-**Limits:**
-- JDBC has no columnar API, so columnar-capable backends lose throughput at the driver boundary
-- Writes are row-batched `INSERT`s; no access to native bulk-load paths (Postgres `COPY`, Snowflake stage+COPY, BigQuery load jobs) without per-dialect escape hatches
-- Type coercion happens via `java.sql.Types`, losing fidelity for Arrow-native types (decimals, timestamps with timezones, nested types, lists)
+**Limits.**
 
-**Related third-party work:**
-- `tokoko/spark-adbc` — the prototype this SPIP is based on; demonstrates the approach works
-- Snowflake, Databricks, BigQuery Spark connectors — each vendor-specific, duplicating infrastructure that ADBC already standardizes
-- Spark Arrow integration — Spark internally uses Arrow for some operations (Python UDFs, pandas API) but not at the data-source boundary
+1. **Converting column data to rows at the driver.** JDBC has no way to return data in columns. So drivers for databases that send data in columns (Arrow Flight SQL, Snowflake, BigQuery's Storage Read API) must convert it to rows to fit `ResultSet`. That undoes work the database already did.
+2. **Reading each value separately in Spark.** Even with row data, Spark builds each `InternalRow` with one `ResultSet.getXxx` call per value. Each call also boxes nullable values as Java objects and converts types. That costs much more than converting a whole Arrow batch at once.
+3. **Converting to columns again downstream.** Vectorized engines (Comet, Gluten) then have to convert the rows back into columns. ADBC batches can be wrapped as a Spark `ColumnarBatch` almost without copying, so data can stay in columns end to end.
+4. **Type precision.** Types are mapped through `java.sql.Types`, which loses detail for decimals, timestamps with time zones, lists and structs.
+5. **Writes.** Writes are batched `INSERT` statements, with no general way to use a database's own bulk-load path.
+
+Benchmarks on the `spark-adbc` prototype show 3–10× read throughput over JDBC on column-oriented databases, and the gap grows on wider tables.
+
+**Related work.**
+- `tokoko/spark-adbc`: the working prototype this SPIP is based on.
+- Vendor Spark connectors (Snowflake, BigQuery, Databricks): each one rebuilds, for a single vendor, what ADBC already standardizes.
 
 ## Q4. What is new in your approach and why do you think it will be successful?
 
-### 4.1 Read path
+**What's new**
 
-The read path maps directly to ADBC's columnar streaming model:
+1. **Data stays in columns from the database to Spark.** Each task reads Arrow batches from the ADBC driver and wraps them as Spark `ColumnarBatch`es through `ArrowColumnVector`, without copying. Spark's row-based operators read them through the standard columnar-to-row step. Vectorized engines (Comet, Gluten) use them directly.
+2. **The database can split the work.** Besides JDBC-style range partitioning on a column, the data source can ask the ADBC driver to split a query's result (`executePartitioned`). Each piece becomes one Spark task. Flight SQL servers already return results this way, and JDBC has no equivalent.
+3. **One connector for many databases.** Any database with an ADBC driver works through the same code. Spark keeps no per-database dialect code: the driver reports the SQL syntax its database uses.
+4. **Arrow types.** Schemas come from the driver in Arrow format, which keeps decimal precision and scale, timestamps with time zones, lists and structs.
 
-1. `DefaultSource.inferSchema` opens an ADBC connection and calls `AdbcStatement.executeSchema(SELECT * FROM <relation>)` to retrieve the Arrow schema without executing the query. Falls back to `executeQuery` on `SELECT ... WHERE 1=0` for drivers that don't implement `executeSchema`.
-2. `AdbcScanBuilder` accepts Spark pushdowns (`pruneColumns`, `pushFilters`, `pushLimit`, `pushTopN`, `pushAggregation`) and compiles them into SQL. Aggregate expressions are emitted with explicit aliases (`COUNT(*) AS agg_0`) so derived-table wrapping works uniformly across dialects.
-3. Parallelism has two independent parts, which can be combined:
-   - **Client-driven partitioning** decides *which queries run*. It does a stride-based split on a numeric column, like the JDBC connector's `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` options, and produces N range queries (`col >= lo AND col < hi`, with NULLs in the first partition). Without these options there is one query.
-   - **Driver-driven partitioning** decides *how each query's result is read*. It is controlled by `driverPartitioning` = `auto` | `required` | `none`. The Spark driver calls `AdbcStatement.executePartitioned` for each query, and the ADBC driver returns opaque partition descriptors. Each descriptor becomes one Spark task, which reads it through `AdbcConnection.readPartition`. Flight SQL backends support this today, and wider adoption is expected. `auto` falls back to plain queries when the driver reports `NOT_IMPLEMENTED`.
+**Why we think it will succeed**
 
-   With both enabled, every range query is split again by the driver, giving N×M Spark partitions. This covers servers that return a single endpoint, or fewer than the user wants: range splitting guarantees a minimum level of parallelism, and driver splitting adds more on top. `driverPartitioning` defaults to `auto` when no range options are given and to `none` when they are, so combining the two is a deliberate choice.
-
-   **Where descriptors are produced.** `executePartitioned` is called in `Batch.planInputPartitions()`, not in `ScanBuilder.build()`. `build()` runs during logical optimization, where executing queries would make `explain()` and schema analysis hit the database. `planInputPartitions()` is called lazily by `BatchScanExec` when the input RDD is built on the Spark driver, and the connector caches its result so each planned scan executes its queries exactly once. When there are several range queries, the first one is sent alone as a probe (an unsupported driver costs one round-trip), and the rest run concurrently, one connection per thread. Descriptors are copied into byte arrays so Spark can serialize them into tasks. The Spark driver closes its connection as soon as planning is done: the ADBC spec says descriptors can be read from other connections and processes.
-
-   **Pushdown interaction.** Range queries each see only a slice of the rows, so limit, Top-N and aggregate pushdown are disabled under client-driven partitioning. Driver partitions are slices of *one* server-side result, so aggregates are fully pushed. Limit and Top-N are pushed too, but reported as partially pushed (`isPartiallyPushed = true`): order across descriptors isn't guaranteed (Flight's `ordered` flag isn't exposed through ADBC), so Spark re-applies them to the already-reduced result.
-4. `AdbcPartitionReader` executes its query, or reads its partition descriptor, and consumes the Arrow record batch stream. It exposes itself as a `PartitionReader[ColumnarBatch]`, wrapping each Arrow batch as a Spark `ColumnarBatch` via `ArrowColumnVector`. Spark's row-based operators consume this via the DSv2 columnar-to-row adapter (no per-cell JDBC-style dispatch); vectorized engines like Comet and Gluten consume it directly.
-
-**Why this succeeds:**
-- Columnar data at the driver boundary eliminates row-shredding for columnar-protocol backends
-- Arrow-to-Spark conversion happens in bulk per batch rather than per-cell via `getXxx` dispatch
-- Pushdown surface matches JDBC's — no feature regression for users switching over
-- Arrow schema preserves type fidelity (decimals with precision/scale, lists, structs, timestamps with timezones) that JDBC flattens through `java.sql.Types`
-
-### 4.2 Write path
-
-This SPIP intentionally restricts the initial write path to **single-node writes** via ADBC's `bulkIngest` API, with per-task transactions for atomicity:
-
-- Spark's `DataWriter.write` buffers Arrow batches in memory
-- `DataWriter.commit` opens an ADBC connection, calls `bulkIngest(table, APPEND)` with the buffered batches, commits the per-task transaction
-- `DataWriter.abort` rolls back and closes resources
-- `BatchWrite.commit/abort` are no-ops — each task is atomic, but there is **no cross-task atomicity**; partial writes remain if the job fails after some tasks succeeded
-
-This matches the semantics of Spark's stock JDBC writer (at-least-once append). It's a deliberate scoping choice. Proper distributed write coordination (staging + merge, 2PC, etc.) requires either:
-
-1. Significant application-level complexity inside the connector (staging-table creation requires DDL privileges many users don't have)
-2. A symmetric "partitioned write" API in the ADBC spec — **does not exist today**. No RFC, issue, or mailing-list thread proposes one as of 2026-04. When it lands, the connector can switch to server-driven distributed writes analogous to server-driven partitioned reads.
-
-Pushing the distributed-write problem down to the ADBC spec — where any driver implementation can solve it uniformly for every client — is a better use of effort than re-implementing staging logic per-dialect in the Spark connector. We recommend tracking a follow-up SPIP once ADBC gains partitioned-write primitives.
-
-### 4.3 SQL dialect handling
-
-JDBC's `JdbcDialect` is the de facto reference for dialect abstraction in Spark. The ADBC data source should follow the same pattern but ideally source dialect metadata *from the ADBC driver itself* where possible.
-
-**Proposal:** a small declarative `SqlDialect` case class with flags covering the pushdown-relevant axes:
-
-```
-identifierQuote          : DoubleQuote | Backtick | Bracket
-limitSyntax              : LimitN | TopN | FetchFirst | None
-nullsOrderingSyntax      : NullsFirstLast | Unsupported
-parameterStyle           : QuestionMark | DollarPositional | NamedColon | NamedAt
-supportedAggregates      : bitmask { COUNT, SUM, AVG, MIN, MAX, ... }
-```
-
-Resolution order at connect time:
-
-1. If the driver populates relevant Flight SQL `SqlInfo` codes (504 `SQL_IDENTIFIER_QUOTE_CHAR`, 507 `SQL_NULL_ORDERING`, 522 `SQL_SUPPORTED_GROUP_BY`, etc.) via `AdbcConnection.getInfo`, use those values directly.
-2. Otherwise, look up a built-in preset keyed off `ADBC_INFO_VENDOR_NAME` (code 0), which every driver does populate — similar to `JdbcDialects.get(url)`.
-3. User-provided `dialect=<name>` option overrides both.
-
-**Status of driver support today (measured, ADBC 0.23.0):**
-
-| Driver | Populates SqlInfo dialect codes? |
-|---|---|
-| Postgres (Apache) | No |
-| DuckDB (DuckDB Foundation) | No |
-| MySQL (Foundry) | No — returns codes with null values |
-| MSSQL (Columnar) | No — returns codes with null values |
-
-Every driver populates `VENDOR_NAME` (code 0), so the vendor-keyed preset path works universally today. The `SqlInfo`-driven path is a forward-compatibility mechanism: as drivers implement the spec more completely, Spark automatically picks up dialect information without connector changes.
-
-**This matters because:** the Spark JDBC connector's dialect layer is per-subclass, procedural, and additions require Spark changes. The ADBC approach pushes as much dialect knowledge as possible into the driver — where it belongs — leaving Spark with a generic fallback.
+- **Working prototype.** It pushes down column selection, filters, limit, Top-N and COUNT/SUM/MIN/MAX/AVG aggregates. It supports range and driver partitioning plus appending writes, and it is tested against several databases.
+- **Low risk to Spark.** It's a new optional data source: existing APIs and the JDBC source are unchanged. It reuses Spark's existing Arrow conversion code (`ArrowColumnVector`, `ArrowWriter`, `ArrowUtils`).
+- **Improvements are shared.** Apache Arrow maintains ADBC, and drivers exist for Postgres, SQLite, DuckDB, Snowflake, BigQuery, Flight SQL, MySQL and MSSQL. When a driver improves, Spark benefits without connector changes.
+- **Limited scope.** Writes are appends that can repeat rows if a job is retried, the same guarantee as the JDBC writer. Atomic writes across tasks wait for ADBC's partitioned bulk ingest API (see Q2).
 
 ## Q5. Who cares? If you are successful, what difference will it make?
 
 - **Analytical Spark users** pulling large result sets from Postgres/DuckDB/Snowflake/BigQuery/Flight SQL backends gain substantial read throughput without changing query patterns
 - **Driver vendors** gain a first-class Spark integration path without maintaining their own connector (Snowflake, Databricks, BigQuery all ship Spark connectors today — each duplicates machinery that ADBC standardizes)
-- **Spark contributors** get a cleaner dialect abstraction that can evolve with the ADBC spec rather than accumulating per-vendor `JdbcDialect` subclasses
+- **Spark contributors** don't maintain per-database dialect code: drivers report their SQL syntax, instead of Spark accumulating `JdbcDialect` subclasses
 - **Arrow ecosystem** gains a canonical example of ADBC integration in a widely-used downstream project, accelerating adoption pressure on driver implementations
 
 ## Q6. What are the risks?
 
-- **ADBC driver ecosystem maturity** — Postgres, SQLite, DuckDB, Snowflake, Flight SQL, MySQL, BigQuery all ship drivers, but they implement the spec unevenly (`executeSchema`, `getStatistics`, `getInfo` codes). The connector must degrade gracefully; we've validated fallback paths for the measured gaps.
+- **ADBC driver ecosystem maturity** — Postgres, SQLite, DuckDB, Snowflake, Flight SQL, MySQL and BigQuery all ship drivers, but they implement the spec unevenly. Mitigation: the connector falls back when an optional feature is missing: `executeSchema` → `WHERE 1=0` query, `executePartitioned` → plain queries, `setAutoCommit(false)` → writing without a transaction.
 - **Native dependencies** — ADBC drivers are typically native (C/C++/Go); the JNI driver introduces platform-specific packaging concerns that pure-Java JDBC drivers don't have. Mitigation: make ADBC an optional data source; users opt in.
+- **Spec evolution** — the ADBC spec (1.1) is versioned and backward compatible, but the Java libraries are still 0.x and their APIs can change. Mitigation: pin library versions per Spark release and treat upgrades as follow-ups.
+- **Upstream prerequisites stalling** — atomic writes depend on ADBC's partitioned bulk ingest API ([apache/arrow-adbc#4317](https://github.com/apache/arrow-adbc/pull/4317)), and database-specific SQL syntax depends on new Flight SQL `SqlInfo` codes ([apache/arrow#49796](https://github.com/apache/arrow/pull/49796)). Both are still open. Mitigation: neither blocks the first version, which uses per-task writes and ANSI SQL with user overrides.
 - **Type mapping edge cases** — Arrow-to-Spark type mapping already exists (used by pandas UDFs), but some Arrow types (extension types, large unions) have no Spark equivalent and need defined fallbacks.
-- **Write semantics expectations** — users moving from other connectors may expect cross-task atomicity. Mitigation: clearly document at-least-once semantics; defer stronger guarantees to the ADBC-spec level.
-- **Driver-partitioned reads execute early and are re-read** — descriptors are produced while Spark plans the job, so with range + driver partitioning all N queries start on the database at once, and the server keeps their results until executors read them. Descriptors are also read again on task retries, speculative execution, and repeated actions on the same `Dataset` (which reuses its executed plan), so drivers must allow a descriptor to be read more than once and must keep it valid for a reasonable time. Mitigation: document these requirements for driver authors and keep `driverPartitioning=none` available. Longer term, ADBC could expose descriptor expiry and ordering metadata (as Flight's `FlightEndpoint.expiration_time` and `FlightInfo.ordered` do).
-- **Uneven driver support for partitioned execution** — as of ADBC 0.23.0 the Java JNI bridge (`adbc-driver-jni`) does not implement `executePartitioned` or `readPartition`, so native drivers loaded through it (including the Go Flight SQL driver) always fall back to plain queries. The pure-Java Flight SQL driver implements it. Mitigation: `auto` falls back gracefully; closing the JNI gap is an upstream ADBC contribution.
-- **Spec evolution** — ADBC is still in pre-2.0; spec changes could affect the connector. Mitigation: pin to a spec version in the initial release; treat upgrades as Spark-version-scoped follow-ups.
-
-## Q7. How long will it take?
-
-Based on the `tokoko/spark-adbc` prototype (working, 76 integration tests passing across DuckDB/MySQL/Postgres/MSSQL):
-
-- **1–2 months**: productionize the read path, port the dialect layer, integrate with Spark's catalog/table APIs, documentation
-- **1 month**: single-node write path with proper resource management, transaction handling, and tests
-- **1–2 months**: Spark PR review cycles, addressing feedback, getting into a Spark release
-
-Total: ~3–5 months from SPIP acceptance to merge.
-
-## Q8. Mid-term and final "exams"
-
-**Mid-term checkpoints:**
-- All JDBC-data-source integration tests pass against an equivalent ADBC configuration (Postgres minimum) — demonstrates feature parity
-- Read benchmark: 3× throughput improvement over JDBC on TPC-H lineitem-scale tables, measured on at least two columnar backends
-
-**Final exam:**
-- Merged into Spark master as an optional data source
-- At least three driver backends covered by CI (Postgres, DuckDB or Flight SQL, one more)
-- Documentation: user guide, dialect-authoring guide, ADBC-driver-author checklist for maximizing pushdown support
+- **Uneven driver support for partitioned execution** — as of ADBC 0.23.0 the JNI bridge (`adbc-driver-jni`) doesn't implement `executePartitioned` or `readPartition`, so native drivers loaded through it (including the Go Flight SQL driver) always use plain queries. The pure-Java Flight SQL driver supports it. Mitigation: `auto` falls back; closing the JNI gap is an upstream ADBC contribution.
 
 ---
 
@@ -165,9 +79,54 @@ spark.read
   .load()
 ```
 
-Configuration options mirror the JDBC data source where meaningful (`partitionColumn`, `lowerBound`, `upperBound`, `numPartitions`) and add ADBC-specific ones (`driver`, `uri`, optional `dialect`, optional `driverPartitioning` = `auto` | `required` | `none`).
+Configuration options mirror the JDBC data source where meaningful (`partitionColumn`, `lowerBound`, `upperBound`, `numPartitions`) and add ADBC-specific ones (`driver`, `uri`, optional dialect overrides, optional `driverPartitioning` = `auto` | `required` | `none`).
 
-## Appendix B: Related work and prototype
+## Appendix B: Design sketch
+
+### B.1 Read path
+
+1. **Schema.** `inferSchema` calls `AdbcStatement.executeSchema` on `SELECT * FROM <relation>`. If the driver doesn't implement it, it runs the query with `WHERE 1=0` instead.
+2. **Pushdown.** `AdbcScanBuilder` turns column pruning, filters, limit, Top-N and aggregates into SQL. Aggregates get explicit aliases (`COUNT(*) AS agg_0`) so the query can be wrapped as a subquery in any dialect. OFFSET, TABLESAMPLE and more aggregate functions (which JDBC supports) can be added later.
+3. **Partitioning.** There are two independent mechanisms, and they can be combined:
+   - **Range partitioning** decides which queries run. It works like JDBC's `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` options and produces N range queries.
+   - **Driver partitioning** (`driverPartitioning` = `auto` | `required` | `none`) decides how each query's result is read. The Spark driver calls `executePartitioned`, and each returned descriptor becomes one Spark task that reads it with `readPartition`. With `auto`, drivers that return `NOT_IMPLEMENTED` fall back to plain queries.
+
+   Combining them gives N×M partitions, which guarantees some parallelism when a server returns few partitions. Driver partitioning defaults to `auto` without range options and to `none` with them.
+
+   Descriptors are produced in `Batch.planInputPartitions()`, not `ScanBuilder.build()`, so `explain()` and schema analysis don't run queries. The result is cached, so each scan runs its queries once. The first range query is a probe, and the rest run concurrently.
+
+   Range partitioning disables limit, Top-N and aggregate pushdown. Driver partitions are slices of a single result, so aggregates are still pushed. Limit and Top-N are pushed but marked partially pushed, because order across descriptors isn't guaranteed.
+4. **Reading.** `AdbcPartitionReader` runs its query or reads its descriptor. It wraps each Arrow batch as a `ColumnarBatch` through `ArrowColumnVector`. Row-based operators read it through Spark's columnar-to-row step, and Comet and Gluten read it directly.
+
+### B.2 Write path
+
+**First version: independent per-task writes.** Each Spark task opens its own connection and writes its partition through ADBC's `bulkIngest(table, APPEND)`. When the driver supports transactions, each task writes in its own transaction: it's committed in `DataWriter.commit` and rolled back in `abort`. Drivers that return `NOT_IMPLEMENTED` for `setAutoCommit(false)` write without a transaction. Tasks aren't coordinated, so `BatchWrite.commit` / `abort` do nothing. If a job fails after some tasks have committed, their rows stay in the table. This is the same at-least-once append behavior as Spark's JDBC writer.
+
+**Later: coordinated writes.** The partitioned bulk ingest API proposed in [apache/arrow-adbc#4317](https://github.com/apache/arrow-adbc/pull/4317) mirrors `executePartitioned` / `readPartition` for writes, and maps directly onto Spark's write commit protocol:
+
+- `ConnectionBulkIngestInit`, on the Spark driver when the `BatchWrite` is created: checks the target table and schema once.
+- `ConnectionInsertPartition`, in each `DataWriter`: stages that task's data and returns a serializable handle, which is sent back in the `WriterCommitMessage`.
+- `ConnectionCompleteIngestPartitions`, in `BatchWrite.commit`: commits all staged handles together.
+
+Once that API is merged and drivers implement it, the connector will use it in place of independent per-task writes, making the whole job atomic. Until then, we avoid building staging tables for each database inside Spark, which would also need DDL privileges many users don't have.
+
+### B.3 SQL dialect handling
+
+**Goal: no dialect definitions in Spark.** Spark's JDBC source needs a `JdbcDialect` subclass per database, and adding a database means changing Spark. The ADBC source instead asks the driver how to write SQL for its database, through `AdbcConnection.getInfo` and Flight SQL `SqlInfo` codes. The connector only needs to know the few syntax choices that pushdown depends on:
+
+| Syntax choice | `SqlInfo` code |
+|---|---|
+| Identifier quote character | 504 `SQL_IDENTIFIER_QUOTE_CHAR` (exists today) |
+| LIMIT / OFFSET syntax | 577 `SQL_SUPPORTED_LIMIT_OFFSET` |
+| `NULLS FIRST` / `NULLS LAST` support | 578 `SQL_SUPPORTED_NULLS_ORDERING` |
+| Boolean literals | 579 `SQL_SUPPORTED_BOOLEAN_LITERAL` |
+| Date/time literals | 580 `SQL_SUPPORTED_DATETIME_LITERAL` |
+
+Codes 577–580 are proposed in [apache/arrow#49796](https://github.com/apache/arrow/pull/49796). That PR is a soft prerequisite: the connector works without it, but can only use a database's own syntax once drivers report these codes.
+
+**Fallback.** When a driver doesn't report a code, the connector uses ANSI SQL for it, and users can override each value with a data source option. No driver reports these codes today (measured with Postgres, DuckDB, MySQL and MSSQL drivers on ADBC 0.23.0), so the fallback is what users get at first. The prototype currently uses built-in presets (ANSI, MSSQL, MySQL) as a stopgap. They will be removed in favor of driver-reported values and per-option overrides.
+
+## References
 
 - Working prototype: https://github.com/tokoko/spark-adbc — 76 integration tests across 4 databases
 - Apache Arrow ADBC spec: https://arrow.apache.org/adbc/
