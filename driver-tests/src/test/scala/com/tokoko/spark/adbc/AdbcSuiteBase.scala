@@ -103,10 +103,12 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
     case other => other.toString
   }
 
-  protected def withConnection[A](f: AdbcConnection => A): A = {
+  protected def withConnection[A](f: AdbcConnection => A): A = withConnection(adbcParams)(f)
+
+  protected def withConnection[A](params: Map[String, Object])(f: AdbcConnection => A): A = {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
-      val db = AdbcDriverManager.getInstance().connect(adbcDriver, allocator, adbcParams.asJava)
+      val db = AdbcDriverManager.getInstance().connect(adbcDriver, allocator, params.asJava)
       try {
         val conn = db.connect()
         try f(conn) finally conn.close()

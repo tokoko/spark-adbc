@@ -113,6 +113,14 @@ object SqlDialect {
     instantLiteral = InstantLiteral.BareStringWithOffset
   )
 
+  // SingleStore speaks MySQL's dialect except that it has NULLS FIRST/LAST, no ESCAPE clause,
+  // and silently mis-reads a date/time string that carries an offset.
+  val Singlestore: SqlDialect = Mysql.copy(
+    nullsOrderingSyntax = NullsOrderingSyntax.NullsFirstLast,
+    likeEscapeSyntax = LikeEscapeSyntax.ImplicitBackslash,
+    instantLiteral = InstantLiteral.Unsupported
+  )
+
   // ClickHouse parses TIMESTAMP '...' as a second-precision DateTime, so fractional
   // seconds only survive as a bare string, and it accepts no literal with an offset.
   val Clickhouse: SqlDialect = Default.copy(
@@ -138,8 +146,9 @@ object SqlDialect {
   def apply(name: String): SqlDialect = name.toLowerCase match {
     case "mssql" => Mssql
     case "mysql" => Mysql
+    case "singlestore" => Singlestore
     case "clickhouse" | "chdb" => Clickhouse
-    case "trino" => Trino
+    case "trino" | "presto" => Trino
     case "spark" => Spark
     case "datafusion" => Datafusion
     case _ => Default

@@ -196,7 +196,9 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
 
   private def requireAccepted(group: String, names: String*): Unit = names.foreach { n =>
     val (outcome, detail) = outcomes((group, n))
-    assert(outcome == DialectReport.Accepted, s"$engine does not accept '$n' ($outcome) $detail")
+    // Not applicable means the engine has no such column type, so there is nothing to accept.
+    assert(outcome == DialectReport.Accepted || outcome == DialectReport.NotApplicable,
+      s"$engine does not accept '$n' ($outcome) $detail")
   }
 
   private def bits(flags: (String, Boolean)*): String = {
