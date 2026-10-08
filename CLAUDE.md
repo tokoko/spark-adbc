@@ -19,9 +19,9 @@ This project uses **SBT** (Scala Build Tool) with a multi-project build.
 - **Java:** 17
 - **Language:** Scala 2.13.17
 - **Framework:** Apache Spark 4.1.1 (DataSource V2 API)
-- **Protocol:** Apache Arrow ADBC 0.22.0
+- **Protocol:** Apache Arrow ADBC 0.23.0
 - **Test framework:** ScalaTest (FunSuite style)
-- **Test databases:** SQLite (embedded), DuckDB (embedded), PostgreSQL (testcontainers), MSSQL (testcontainers)
+- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino (testcontainers)
 
 ## Project Structure
 
@@ -43,7 +43,7 @@ src/main/scala/
     AdbcDataWriterFactory.scala
     AdbcDataWriter.scala        # Write path: buffers rows, bulk inserts
     AdbcWriterCommitMessage.scala
-    SqlDialect.scala            # SQL dialect abstraction (Default, SQLite, MSSQL)
+    SqlDialect.scala            # SQL dialect flags (Default, MSSQL, MySQL, ClickHouse, DataFusion, Trino)
     FilterConverter.scala       # Spark filter -> SQL WHERE conversion
   org/apache/spark/sql/util/
     ArrowUtilsExtended.scala    # Arrow <-> Spark format conversion utilities
@@ -54,11 +54,16 @@ src/test/scala/
 driver-tests/                   # Separate subproject for driver integration tests
   src/test/scala/
     com/tokoko/spark/adbc/
-      AdbcTestBase.scala        # Abstract base test suite (18 tests)
-      AdbcSqliteTest.scala      # SQLite driver tests
-      AdbcDuckdbTest.scala      # DuckDB driver tests
-      AdbcPostgresTest.scala    # PostgreSQL driver tests (testcontainers)
-      AdbcMssqlTest.scala       # MSSQL driver tests (testcontainers)
+      Fixtures.scala            # Engine-independent fixture tables (types, strings, nulls, ...)
+      AdbcSuiteBase.scala       # Per-engine plumbing: DDL from fixtures, checkSame, knownGaps
+      AdbcTestBase.scala        # Full suite = CoreTests + the traits below
+      PushdownTests.scala       # DataTypeTests, LiteralPushdownTests, OrderLimitTests, AggregateTests
+      DialectProbeTests.scala   # Raw-SQL syntax probes per dialect flag
+      DialectReport.scala       # Renders target/dialect-matrix.md
+      Gaps.scala                # Reasons used in knownGaps
+      Adbc{Postgres,Mysql,Mssql,Duckdb,Clickhouse,Trino,Datafusion}Test.scala  # Full suite per engine
+      AdbcSqliteTest.scala      # Syntax probes only
+      AdbcDriverPartitioningTest.scala
 ```
 
 ## Architecture
@@ -72,11 +77,18 @@ Users configure the connector with options: `driver` (ADBC driver class), `uri` 
 
 ### SQL Dialect Support
 
-The `SqlDialect` trait abstracts database-specific SQL differences. Set via the `dialect` option:
+`SqlDialect` is a set of choices a query generator has to make per engine. Five mirror existing or proposed SqlInfo codes (identifier quote 504, and limit syntax, null ordering syntax, boolean literal, date/time literal from apache/arrow#49796). Four more cover what the driver tests showed those don't: LIKE escaping (`ESCAPE '!'` clause vs implicit backslash), whether backslash is an escape inside string literals, whether non-ASCII literals need `N'...'`, and how an instant (timestamp with time zone) literal is written. Instants are always rendered in UTC with an explicit `+00:00`; a dialect with `InstantLiteral.Unsupported` keeps those comparisons in Spark.
 
-- **`default`** — ANSI SQL: `LIMIT`, `NULLS FIRST/LAST`, `WHERE 1=0` for schema inference
-- **`sqlite`** — Like default but uses `LIMIT 1` for schema inference (SQLite needs real data to infer aggregate types)
-- **`mssql`** — T-SQL: `TOP N` instead of `LIMIT`, no `NULLS FIRST/LAST`, `WHERE 1=0` for schema inference
+Set via the `dialect` option:
+
+- **`default`** — double-quoted identifiers, `LIMIT`, `NULLS FIRST/LAST`, `TRUE`/`FALSE`, `DATE '...'`/`TIMESTAMP '...'`, `LIKE ... ESCAPE '!'`, literal backslash, `TIMESTAMP WITH TIME ZONE '...'` for instants
+- **`mssql`** — `OFFSET ... FETCH`, no `NULLS FIRST/LAST`, `1`/`0`, bare-string date/time and instant literals, `N'...'` for non-ASCII
+- **`mysql`** — backtick identifiers, no `NULLS FIRST/LAST`, bare-string date/time and instant literals, backslash escapes
+- **`clickhouse`** (also `chdb`) — bare-string date/time literals, implicit-backslash LIKE, backslash escapes, no instant literal
+- **`datafusion`** — like default but implicit-backslash LIKE
+- **`trino`** — like default but `TIMESTAMP '...+00:00'` for instants
+
+When `dialect` is not set, the `jni.driver` name picks the dialect.
 
 ### Pushdown Support
 
@@ -101,6 +113,11 @@ Orthogonal to range partitioning: the `driverPartitioning` option (`auto` | `req
 ## Testing
 
 - **Unit tests** (`src/test/`): Comet integration and JDBC benchmarks (require external PostgreSQL via Docker)
-- **Driver tests** (`driver-tests/`): 72 tests across 4 databases (SQLite, DuckDB, PostgreSQL, MSSQL) validating reads, pushdowns, aggregates, and partitioned reads. PostgreSQL and MSSQL use testcontainers (require Docker). DuckDB uses `path` option instead of `uri`.
+- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse and Trino run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>`.
+  - **Differential tests** (`checkSame`): the same DataFrame query runs through the connector and over an in-memory copy of the fixture; rows must match and the listed operators must really have been pushed down. Add a case by adding one line to a trait in `PushdownTests.scala`.
+  - **Syntax probes** (`DialectProbeTests`): raw SQL variants for each dialect choice (limit/offset, NULLS FIRST/LAST, boolean and date/time literals, quoting, LIKE escaping, ...) sent straight through ADBC. The cross-engine result is written to `driver-tests/target/dialect-matrix.md`, together with the type mapping and known gaps.
+  - **Known gaps**: a test that fails on an engine for an understood reason is listed in that suite's `knownGaps` and is cancelled instead of failed. If it starts passing, the suite fails until the entry is removed.
+  - **Adding an engine**: extend `AdbcTestBase`, give `engine`, `adbcParams`, `sqlType` (native type per fixture type) and whatever of `setupLiteral`/`columnDdl`/`createTable` the engine needs.
+  - The test JVM runs in a fixed non-UTC zone (`-Duser.timezone=Asia/Tbilisi`) so time zone mistakes in literals can't pass by accident.
 
 Run driver tests: `pixi run sbt driverTests/test`

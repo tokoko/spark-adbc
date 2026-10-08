@@ -2,29 +2,26 @@ package com.tokoko.spark.adbc
 
 import org.apache.arrow.adbc.drivermanager.AdbcDriverManager
 import org.apache.arrow.memory.RootAllocator
-import org.apache.spark.sql.{DataFrame, DataFrameReader, SparkSession}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
-import org.scalatest.BeforeAndAfterAll
-import org.scalatest.funsuite.AnyFunSuite
 
 import scala.jdk.CollectionConverters._
 
-abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
+/** Full connector suite for one engine: every test group, against the shared fixtures. */
+abstract class AdbcTestBase extends AdbcSuiteBase
+  with CoreTests
+  with DataTypeTests
+  with LiteralPushdownTests
+  with OrderLimitTests
+  with AggregateTests
+  with DialectProbeTests
 
-  protected var spark: SparkSession = _
+trait CoreTests { this: AdbcSuiteBase =>
 
-  protected def setupDatabase(): Unit
-  protected def teardownDatabase(): Unit
+  /** False for engines whose fixtures aren't real tables (DataFusion reads parquet files). */
+  protected def supportsWrite: Boolean = true
 
-  /** Returns a DataFrameReader pre-configured with driver-specific options. */
-  protected def adbcReader: DataFrameReader
-
-  /** Raw ADBC connect parameters used for the executeSchema probe. */
-  protected def adbcDriver: String
-  protected def adbcParams: Map[String, Object]
-
-  protected def readTable: DataFrame =
-    adbcReader.option("dbtable", "employees").load()
+  protected def readTable: DataFrame = load("employees")
 
   protected def writeTo(df: DataFrame, dbtable: String): Unit = {
     val base = df.write.format("com.tokoko.spark.adbc")
@@ -36,69 +33,58 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
 
   protected def readTablePartitioned: DataFrame =
     adbcReader
-      .option("dbtable", "employees")
+      .option("dbtable", tableRef("employees"))
       .option("partitionColumn", "id")
       .option("lowerBound", "1")
       .option("upperBound", "4")
       .option("numPartitions", "3")
       .load()
 
-  override def beforeAll(): Unit = {
-    setupDatabase()
-    spark = SparkSession.builder().master("local").getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
-  }
-
-  override def afterAll(): Unit = {
-    if (spark != null) spark.stop()
-    teardownDatabase()
-  }
-
   test("read via query option") {
-    val df = adbcReader.option("query", "SELECT * FROM employees").load()
+    val df = adbcReader.option("query", s"SELECT * FROM ${tableRef("employees")}").load()
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.columns.toSet == Set("id", "name", "salary"))
   }
 
   test("read via dbtable option") {
     val df = readTable
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.columns.toSet == Set("id", "name", "salary"))
   }
 
   test("column pruning") {
     val df = readTable.select("name", "salary")
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.columns.toSet == Set("name", "salary"))
   }
 
   test("filter pushdown - equality") {
     val df = readTable.filter("name = 'Robin'")
     df.show()
-    assert(df.count() == 1)
+    assert(df.collect().length == 1)
     assert(df.collect()(0).getAs[String]("name") == "Robin")
   }
 
   test("filter pushdown - comparison") {
     val df = readTable.filter("salary > 2000")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("filter pushdown with column pruning") {
     val df = readTable.select("name", "salary").filter("salary >= 3000")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
     assert(df.columns.toSet == Set("name", "salary"))
   }
 
   test("limit pushdown") {
     val df = readTable.limit(2)
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("topN pushdown - descending") {
@@ -152,19 +138,19 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
   test("aggregate pushdown - group by") {
     val df = readTable.groupBy("name").agg(sum("salary").as("total"))
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
   }
 
   test("aggregate pushdown - group by with filter") {
     val df = readTable.filter("salary > 2000").groupBy("name").agg(sum("salary").as("total"))
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("partitioned read - all rows returned") {
     val df = readTablePartitioned
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.columns.toSet == Set("id", "name", "salary"))
   }
 
@@ -176,7 +162,7 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
   test("partitioned read with filter") {
     val df = readTablePartitioned.filter("salary > 2000")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("partitioned read with aggregation") {
@@ -190,66 +176,66 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("reserved keyword as column name") {
-    val df = adbcReader.option("dbtable", "reserved_kw").load()
+    val df = load("reserved_kw")
     df.show()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.columns.toSet == Set("id", "order"))
   }
 
   test("reserved keyword with filter") {
-    val df = adbcReader.option("dbtable", "reserved_kw").load().filter("`order` > 15")
+    val df = load("reserved_kw").filter("`order` > 15")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("date literal pushdown") {
-    val df = adbcReader.option("dbtable", "events").load()
+    val df = load("events")
       .filter("event_date > date '2024-03-01'")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("date literal IN list") {
-    val df = adbcReader.option("dbtable", "events").load()
+    val df = load("events")
       .filter("event_date IN (date '2024-01-15', date '2025-03-10')")
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
   }
 
   test("boolean literal pushdown") {
-    val df = adbcReader.option("dbtable", "events").load()
+    val df = load("events")
     assume(df.schema("active").dataType == org.apache.spark.sql.types.BooleanType,
       "driver does not expose the column as boolean")
     val filtered = df.filter("active = true")
     filtered.show()
-    assert(filtered.count() == 2)
+    assert(filtered.collect().length == 2)
   }
 
   test("topN nulls first (Spark default, ASC)") {
-    val df = adbcReader.option("dbtable", "sortable").load()
+    val df = load("sortable")
       .orderBy(col("sort_key").asc).limit(3)
     val got = df.collect().map(r => Option(r.getAs[Any]("sort_key")).map(_.toString.toInt)).toSeq
     assert(got == Seq(None, None, Some(10)))
   }
 
   test("topN nulls last on ASC") {
-    val df = adbcReader.option("dbtable", "sortable").load()
+    val df = load("sortable")
       .orderBy(col("sort_key").asc_nulls_last).limit(3)
     val got = df.collect().map(r => Option(r.getAs[Any]("sort_key")).map(_.toString.toInt)).toSeq
     assert(got == Seq(Some(10), Some(20), Some(30)))
   }
 
   test("topN nulls first on DESC") {
-    val df = adbcReader.option("dbtable", "sortable").load()
+    val df = load("sortable")
       .orderBy(col("sort_key").desc_nulls_first).limit(3)
     val got = df.collect().map(r => Option(r.getAs[Any]("sort_key")).map(_.toString.toInt)).toSeq
     assert(got == Seq(None, None, Some(30)))
   }
 
   test("reserved keyword with order by") {
-    val df = adbcReader.option("dbtable", "reserved_kw").load().orderBy("order").limit(2)
+    val df = load("reserved_kw").orderBy("order").limit(2)
     df.show()
-    assert(df.count() == 2)
+    assert(df.collect().length == 2)
     assert(df.collect().map(_.getAs[Int]("order")).toSeq == Seq(10, 20))
   }
 
@@ -260,22 +246,23 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
     // only rows where name contains literal 'i_' (which is zero rows). Without
     // proper escaping, 'i_' matches 'iX' for any X (2 rows: Tornike, Alice).
     val df = readTable.filter($"name".contains("i_"))
-    assert(df.count() == 0)
+    assert(df.collect().length == 0)
   }
 
   test("single partition covers all rows") {
     val df = adbcReader
-      .option("dbtable", "employees")
+      .option("dbtable", tableRef("employees"))
       .option("partitionColumn", "id")
       .option("lowerBound", "1")
       .option("upperBound", "4")
       .option("numPartitions", "1")
       .load()
-    assert(df.count() == 3)
+    assert(df.collect().length == 3)
     assert(df.rdd.getNumPartitions == 1)
   }
 
   test("write appends rows and read back") {
+    assume(supportsWrite, s"$engine fixtures are not writable tables")
     val s = spark
     import s.implicits._
     val batch = Seq(
@@ -284,15 +271,15 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
       (12, "Arrival", 7000)
     ).toDF("id", "name", "salary")
     writeTo(batch, "write_target")
-    val got = adbcReader.option("dbtable", "write_target").load()
-    assert(got.count() == 3)
+    val got = load("write_target")
+    assert(got.collect().length == 3)
     val rows = got.orderBy("id").collect()
     assert(rows.map(_.getAs[Int]("id")).toSeq == Seq(10, 11, 12))
     assert(rows.map(_.getAs[Int]("salary")).toSeq == Seq(5000, 6000, 7000))
   }
 
   test("probe: getInfo SqlInfo codes") {
-    val tag = adbcParams.getOrElse("jni.driver", "?")
+    val tag = engine
     val allocator = new RootAllocator(Long.MaxValue)
     val db = AdbcDriverManager.getInstance().connect(adbcDriver, allocator, adbcParams.asJava)
     try {
@@ -326,18 +313,19 @@ abstract class AdbcTestBase extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("probe: executeSchema support") {
+    val emp = tableRef("employees")
     val queries = Seq(
-      "q1 select-star"       -> "SELECT * FROM employees",
-      "q2 pure count"        -> "SELECT COUNT(*) FROM employees",
-      "q3 sum only"          -> "SELECT SUM(salary) FROM employees",
-      "q4 arithmetic"        -> "SELECT salary + 1 FROM employees",
-      "q5 literal"           -> "SELECT 1 AS x FROM employees",
-      "q6 string fn"         -> "SELECT UPPER(name) FROM employees",
-      "q7 aliased col"       -> "SELECT salary AS pay FROM employees",
-      "q8 aliased aggregate" -> "SELECT SUM(salary) AS total FROM employees",
+      "q1 select-star"       -> s"SELECT * FROM $emp",
+      "q2 pure count"        -> s"SELECT COUNT(*) FROM $emp",
+      "q3 sum only"          -> s"SELECT SUM(salary) FROM $emp",
+      "q4 arithmetic"        -> s"SELECT salary + 1 FROM $emp",
+      "q5 literal"           -> s"SELECT 1 AS x FROM $emp",
+      "q6 string fn"         -> s"SELECT UPPER(name) FROM $emp",
+      "q7 aliased col"       -> s"SELECT salary AS pay FROM $emp",
+      "q8 aliased aggregate" -> s"SELECT SUM(salary) AS total FROM $emp",
       "q9 no from"           -> "SELECT 1 AS x"
     )
-    val tag = adbcParams.getOrElse("jni.driver", "?")
+    val tag = engine
     val allocator = new RootAllocator(Long.MaxValue)
     val db = AdbcDriverManager.getInstance().connect(adbcDriver, allocator, adbcParams.asJava)
     try {

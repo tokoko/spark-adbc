@@ -1,58 +1,22 @@
 package com.tokoko.spark.adbc
 
-import org.apache.spark.sql.DataFrameReader
 import org.testcontainers.containers.MySQLContainer
-
-import java.sql.DriverManager
 
 class AdbcMysqlTest extends AdbcTestBase {
 
-  private val driverFactory = "org.apache.arrow.adbc.driver.jni.JniDriverFactory"
   private var container: MySQLContainer[_] = _
 
-  override protected def setupDatabase(): Unit = {
+  override protected def engine: String = "mysql"
+
+  override protected def startDatabase(): Unit = {
     container = new MySQLContainer("mysql:8.4")
     container.start()
-
-    val conn = DriverManager.getConnection(
-      container.getJdbcUrl, container.getUsername, container.getPassword
-    )
-    val stmt = conn.createStatement()
-    stmt.execute("CREATE TABLE employees(id INTEGER NOT NULL, name VARCHAR(255), salary INTEGER NOT NULL)")
-    stmt.execute("INSERT INTO employees VALUES (1, 'Tornike', 2000)")
-    stmt.execute("INSERT INTO employees VALUES (2, 'Robin', 3000)")
-    stmt.execute("INSERT INTO employees VALUES (3, 'Alice', 4000)")
-    stmt.execute("CREATE TABLE reserved_kw(id INTEGER NOT NULL, `order` INTEGER NOT NULL)")
-    stmt.execute("INSERT INTO reserved_kw VALUES (1, 10), (2, 20), (3, 30)")
-    stmt.execute("CREATE TABLE events(id INTEGER NOT NULL, event_date DATE NOT NULL, active BOOLEAN NOT NULL)")
-    stmt.execute("INSERT INTO events VALUES (1, '2024-01-15', TRUE), (2, '2024-06-20', FALSE), (3, '2025-03-10', TRUE)")
-    stmt.execute("CREATE TABLE sortable(id INTEGER NOT NULL, sort_key INTEGER)")
-    stmt.execute("INSERT INTO sortable VALUES (1, 10), (2, NULL), (3, 30), (4, 20), (5, NULL)")
-    stmt.execute("CREATE TABLE write_target(id INTEGER NOT NULL, name VARCHAR(255), salary INTEGER NOT NULL)")
-    stmt.close()
-    conn.close()
   }
 
-  override protected def teardownDatabase(): Unit = {
+  override protected def stopDatabase(): Unit = {
     if (container != null) container.stop()
   }
 
-  override protected def adbcReader: DataFrameReader = {
-    val host = container.getHost
-    val port = container.getMappedPort(3306)
-    val db = container.getDatabaseName
-    val user = container.getUsername
-    val pass = container.getPassword
-    val uri = s"mysql://$user:$pass@$host:$port/$db"
-
-    spark.read
-      .format("com.tokoko.spark.adbc")
-      .option("driver", driverFactory)
-      .option("jni.driver", "mysql")
-      .option("uri", uri)
-  }
-
-  override protected def adbcDriver: String = driverFactory
   override protected def adbcParams: Map[String, Object] = {
     val host = container.getHost
     val port = container.getMappedPort(3306)
@@ -64,5 +28,42 @@ class AdbcMysqlTest extends AdbcTestBase {
       "uri" -> s"mysql://$user:$pass@$host:$port/$db"
     )
   }
+
+  override protected def sqlType(t: ColType): Option[String] = Some(t match {
+    case ColType.Int16 => "SMALLINT"
+    case ColType.Int32 => "INTEGER"
+    case ColType.Int64 => "BIGINT"
+    case ColType.Float32 => "FLOAT"
+    case ColType.Float64 => "DOUBLE"
+    // The driver returns precision <= 18 as decimal32/decimal64, which Arrow Java misreads
+    // (see the small_decimals test), so the general-purpose fixture column is made wider.
+    case ColType.Decimal(18, s) => s"DECIMAL(20, $s)"
+    case ColType.Decimal(p, s) => s"DECIMAL($p, $s)"
+    case ColType.Str => "VARCHAR(255)"
+    case ColType.Bool => "BOOLEAN"
+    case ColType.Date => "DATE"
+    case ColType.Timestamp => "DATETIME(6)"
+    case ColType.TimestampTz => "TIMESTAMP(6)"
+    case ColType.Binary => "VARBINARY(255)"
+  })
+
+  // Backslash is an escape character in MySQL string literals.
+  override protected def setupLiteral(v: Any, t: ColType): String = v match {
+    case s: String => super.setupLiteral(s.replace("\\", "\\\\"), t)
+    case _ => super.setupLiteral(v, t)
+  }
+
+  override protected def knownGaps: Map[String, String] = Map(
+    "types: decimals narrower than 64 bits" -> Gaps.NarrowDecimal,
+    "write: all types round trip" -> Gaps.BooleanAsTinyint,
+    "literal string: equality" -> Gaps.Collation,
+    "literal string: equality is case sensitive" -> Gaps.Collation,
+    "literal string: range comparison" -> Gaps.Collation,
+    "LIKE: prefix is case sensitive" -> Gaps.Collation,
+    "agg: group by string is case sensitive" -> Gaps.Collation,
+    "topN: string order matches Spark" -> Gaps.SortCollation,
+    "agg: sum of integers" -> Gaps.WideDecimal,
+    "agg: sum of decimal and double" -> Gaps.WideDecimal
+  )
 
 }
