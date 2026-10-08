@@ -55,12 +55,19 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
   protected def knownGaps: Map[String, String] = Map.empty
 
   /** The dialect the connector picks for this engine. */
-  protected def dialect: SqlDialect = SqlDialect.fromOptions(None, Some(engine))
+  protected def dialect: SqlDialect = SqlDialect.fromOptions(dialectName, Some(engine))
 
-  protected def adbcReader: DataFrameReader =
-    adbcParams.foldLeft(spark.read.format("com.tokoko.spark.adbc").option("driver", adbcDriver)) {
-      case (r, (k, v)) => r.option(k, v.toString)
-    }
+  /**
+   * Explicit `dialect` option. Needed when the driver name says nothing about the SQL the
+   * server speaks, as with Flight SQL; otherwise the connector derives it from `jni.driver`.
+   */
+  protected def dialectName: Option[String] = None
+
+  protected def adbcReader: DataFrameReader = {
+    val base = spark.read.format("com.tokoko.spark.adbc").option("driver", adbcDriver)
+    val withDialect = dialectName.fold(base)(base.option("dialect", _))
+    adbcParams.foldLeft(withDialect) { case (r, (k, v)) => r.option(k, v.toString) }
+  }
 
   /** How a fixture table is referenced in SQL and in the `dbtable` option. */
   protected def tableRef(name: String): String = name

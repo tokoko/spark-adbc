@@ -18,7 +18,7 @@ abstract class AdbcTestBase extends AdbcSuiteBase
 
 trait CoreTests { this: AdbcSuiteBase =>
 
-  /** False for engines whose fixtures aren't real tables (DataFusion reads parquet files). */
+  /** False where bulk ingest can't run in the test setup; each suite that overrides it says why. */
   protected def supportsWrite: Boolean = true
 
   protected def readTable: DataFrame = load("employees")
@@ -262,7 +262,7 @@ trait CoreTests { this: AdbcSuiteBase =>
   }
 
   test("write appends rows and read back") {
-    assume(supportsWrite, s"$engine fixtures are not writable tables")
+    assume(supportsWrite, s"writes are not set up for $engine")
     val s = spark
     import s.implicits._
     val batch = Seq(
