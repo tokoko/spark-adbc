@@ -58,5 +58,6 @@ lazy val driverTests = (project in file("driver-tests"))
       "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % Test
     ),
     Test / fork := true,
-    Test / javaOptions ++= javaOpens
+    // A fixed non-UTC zone, so literals rendered in the JVM zone can't pass by accident.
+    Test / javaOptions ++= javaOpens :+ "-Duser.timezone=Asia/Tbilisi"
   )

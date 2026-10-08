@@ -32,12 +32,53 @@ object DateTimeLiteral {
   case object BareString extends DateTimeLiteral
 }
 
+/** How `%` and `_` are escaped in a LIKE pattern. */
+sealed trait LikeEscapeSyntax
+object LikeEscapeSyntax {
+  /** `LIKE '...' ESCAPE '!'` with a chosen escape character. */
+  case object EscapeClause extends LikeEscapeSyntax
+  /** Backslash escapes and there is no usable ESCAPE clause. */
+  case object ImplicitBackslash extends LikeEscapeSyntax
+}
+
+/** What a backslash means inside a quoted string literal. */
+sealed trait StringBackslash
+object StringBackslash {
+  case object Literal extends StringBackslash
+  case object Escape extends StringBackslash
+}
+
+/** How a string literal holding non-ASCII characters has to be written. */
+sealed trait NonAsciiLiteral
+object NonAsciiLiteral {
+  case object Plain extends NonAsciiLiteral
+  /** `N'...'`; a plain literal is converted through a single-byte code page first. */
+  case object NationalPrefix extends NonAsciiLiteral
+}
+
+/** Literal for a point in time (timestamp with time zone), written in UTC with an explicit offset. */
+sealed trait InstantLiteral
+object InstantLiteral {
+  /** `TIMESTAMP '2024-01-01 00:00:00.000000+00:00'` */
+  case object KeywordWithOffset extends InstantLiteral
+  /** `TIMESTAMP WITH TIME ZONE '2024-01-01 00:00:00.000000+00:00'` */
+  case object WithTimeZoneKeyword extends InstantLiteral
+  /** `'2024-01-01 00:00:00.000000+00:00'` */
+  case object BareStringWithOffset extends InstantLiteral
+  /** No literal carries an offset; comparisons against instants are not pushed down. */
+  case object Unsupported extends InstantLiteral
+}
+
 case class SqlDialect(
   identifierQuote: IdentifierQuote,
   limitOffsetSyntax: LimitOffsetSyntax,
   nullsOrderingSyntax: NullsOrderingSyntax,
   boolLiteral: BoolLiteral,
-  dateTimeLiteral: DateTimeLiteral
+  dateTimeLiteral: DateTimeLiteral,
+  likeEscapeSyntax: LikeEscapeSyntax,
+  stringBackslash: StringBackslash,
+  nonAsciiLiteral: NonAsciiLiteral,
+  instantLiteral: InstantLiteral
 )
 
 object SqlDialect {
@@ -46,28 +87,52 @@ object SqlDialect {
     limitOffsetSyntax = LimitOffsetSyntax.LimitOffset,
     nullsOrderingSyntax = NullsOrderingSyntax.NullsFirstLast,
     boolLiteral = BoolLiteral.TrueFalse,
-    dateTimeLiteral = DateTimeLiteral.AnsiKeyword
+    dateTimeLiteral = DateTimeLiteral.AnsiKeyword,
+    likeEscapeSyntax = LikeEscapeSyntax.EscapeClause,
+    stringBackslash = StringBackslash.Literal,
+    nonAsciiLiteral = NonAsciiLiteral.Plain,
+    // PostgreSQL and DuckDB silently drop the offset of TIMESTAMP '...+00:00', so the default is
+    // the spelling that an engine either honours or rejects.
+    instantLiteral = InstantLiteral.WithTimeZoneKeyword
   )
 
-  val Mssql: SqlDialect = SqlDialect(
-    identifierQuote = IdentifierQuote.DoubleQuote,
+  val Mssql: SqlDialect = Default.copy(
     limitOffsetSyntax = LimitOffsetSyntax.OffsetFetch,
     nullsOrderingSyntax = NullsOrderingSyntax.Unsupported,
     boolLiteral = BoolLiteral.IntOneZero,
-    dateTimeLiteral = DateTimeLiteral.BareString
+    dateTimeLiteral = DateTimeLiteral.BareString,
+    nonAsciiLiteral = NonAsciiLiteral.NationalPrefix,
+    instantLiteral = InstantLiteral.BareStringWithOffset
   )
 
-  val Mysql: SqlDialect = SqlDialect(
+  val Mysql: SqlDialect = Default.copy(
     identifierQuote = IdentifierQuote.Backtick,
-    limitOffsetSyntax = LimitOffsetSyntax.LimitOffset,
     nullsOrderingSyntax = NullsOrderingSyntax.Unsupported,
-    boolLiteral = BoolLiteral.TrueFalse,
-    dateTimeLiteral = DateTimeLiteral.BareString
+    dateTimeLiteral = DateTimeLiteral.BareString,
+    stringBackslash = StringBackslash.Escape,
+    instantLiteral = InstantLiteral.BareStringWithOffset
   )
+
+  // ClickHouse parses TIMESTAMP '...' as a second-precision DateTime, so fractional
+  // seconds only survive as a bare string, and it accepts no literal with an offset.
+  val Clickhouse: SqlDialect = Default.copy(
+    dateTimeLiteral = DateTimeLiteral.BareString,
+    likeEscapeSyntax = LikeEscapeSyntax.ImplicitBackslash,
+    stringBackslash = StringBackslash.Escape,
+    instantLiteral = InstantLiteral.Unsupported
+  )
+
+  // Trino spells every timestamp literal TIMESTAMP '...' and types it by its content.
+  val Trino: SqlDialect = Default.copy(instantLiteral = InstantLiteral.KeywordWithOffset)
+
+  val Datafusion: SqlDialect = Default.copy(likeEscapeSyntax = LikeEscapeSyntax.ImplicitBackslash)
 
   def apply(name: String): SqlDialect = name.toLowerCase match {
     case "mssql" => Mssql
     case "mysql" => Mysql
+    case "clickhouse" | "chdb" => Clickhouse
+    case "trino" => Trino
+    case "datafusion" => Datafusion
     case _ => Default
   }
 

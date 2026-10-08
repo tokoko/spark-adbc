@@ -44,7 +44,7 @@ class AdbcScanBuilder(
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-    val (supported, unsupported) = filters.partition(FilterConverter.canConvert)
+    val (supported, unsupported) = filters.partition(FilterConverter.canConvert(_, dialect))
     pushedFilterArray = supported
     unsupported
   }
