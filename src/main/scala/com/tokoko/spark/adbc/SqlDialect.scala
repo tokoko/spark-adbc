@@ -125,6 +125,14 @@ object SqlDialect {
   // Trino spells every timestamp literal TIMESTAMP '...' and types it by its content.
   val Trino: SqlDialect = Default.copy(instantLiteral = InstantLiteral.KeywordWithOffset)
 
+  // Spark SQL reads "..." as a string and treats backslash as an escape, like MySQL, but has
+  // NULLS FIRST/LAST and typed date/time literals.
+  val Spark: SqlDialect = Default.copy(
+    identifierQuote = IdentifierQuote.Backtick,
+    stringBackslash = StringBackslash.Escape,
+    instantLiteral = InstantLiteral.KeywordWithOffset
+  )
+
   val Datafusion: SqlDialect = Default.copy(likeEscapeSyntax = LikeEscapeSyntax.ImplicitBackslash)
 
   def apply(name: String): SqlDialect = name.toLowerCase match {
@@ -132,6 +140,7 @@ object SqlDialect {
     case "mysql" => Mysql
     case "clickhouse" | "chdb" => Clickhouse
     case "trino" => Trino
+    case "spark" => Spark
     case "datafusion" => Datafusion
     case _ => Default
   }

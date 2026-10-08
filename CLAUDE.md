@@ -21,7 +21,7 @@ This project uses **SBT** (Scala Build Tool) with a multi-project build.
 - **Framework:** Apache Spark 4.1.1 (DataSource V2 API)
 - **Protocol:** Apache Arrow ADBC 0.23.0
 - **Test framework:** ScalaTest (FunSuite style)
-- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino (testcontainers)
+- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, GizmoSQL via Flight SQL, Spark Connect (testcontainers)
 
 ## Project Structure
 
@@ -43,7 +43,7 @@ src/main/scala/
     AdbcDataWriterFactory.scala
     AdbcDataWriter.scala        # Write path: buffers rows, bulk inserts
     AdbcWriterCommitMessage.scala
-    SqlDialect.scala            # SQL dialect flags (Default, MSSQL, MySQL, ClickHouse, DataFusion, Trino)
+    SqlDialect.scala            # SQL dialect flags (Default, MSSQL, MySQL, ClickHouse, DataFusion, Trino, Spark)
     FilterConverter.scala       # Spark filter -> SQL WHERE conversion
   org/apache/spark/sql/util/
     ArrowUtilsExtended.scala    # Arrow <-> Spark format conversion utilities
@@ -62,6 +62,8 @@ driver-tests/                   # Separate subproject for driver integration tes
       DialectReport.scala       # Renders target/dialect-matrix.md
       Gaps.scala                # Reasons used in knownGaps
       Adbc{Postgres,Mysql,Mssql,Duckdb,Clickhouse,Trino,Datafusion}Test.scala  # Full suite per engine
+      AdbcGizmosqlTest.scala    # Full suite over the Flight SQL driver (DuckDB server)
+      AdbcSparkConnectTest.scala # Full suite against a Spark Connect server
       AdbcSqliteTest.scala      # Syntax probes only
       AdbcDriverPartitioningTest.scala
 ```
@@ -87,6 +89,7 @@ Set via the `dialect` option:
 - **`clickhouse`** (also `chdb`) — bare-string date/time literals, implicit-backslash LIKE, backslash escapes, no instant literal
 - **`datafusion`** — like default but implicit-backslash LIKE
 - **`trino`** — like default but `TIMESTAMP '...+00:00'` for instants
+- **`spark`** — backtick identifiers, backslash escapes, `TIMESTAMP '...+00:00'` for instants
 
 When `dialect` is not set, the `jni.driver` name picks the dialect.
 
@@ -113,10 +116,11 @@ Orthogonal to range partitioning: the `driverPartitioning` option (`auto` | `req
 ## Testing
 
 - **Unit tests** (`src/test/`): Comet integration and JDBC benchmarks (require external PostgreSQL via Docker)
-- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse and Trino run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>`.
+- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, GizmoSQL (DuckDB behind Flight SQL) and Spark Connect run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>`.
   - **Differential tests** (`checkSame`): the same DataFrame query runs through the connector and over an in-memory copy of the fixture; rows must match and the listed operators must really have been pushed down. Add a case by adding one line to a trait in `PushdownTests.scala`.
   - **Syntax probes** (`DialectProbeTests`): raw SQL variants for each dialect choice (limit/offset, NULLS FIRST/LAST, boolean and date/time literals, quoting, LIKE escaping, ...) sent straight through ADBC. The cross-engine result is written to `driver-tests/target/dialect-matrix.md`, together with the type mapping and known gaps.
   - **Known gaps**: a test that fails on an engine for an understood reason is listed in that suite's `knownGaps` and is cancelled instead of failed. If it starts passing, the suite fails until the entry is removed.
+  - **Flight SQL**: the `flightsql` driver name says nothing about the server's SQL, so such a suite sets `dialectName`, which is passed as the `dialect` option.
   - **Adding an engine**: extend `AdbcTestBase`, give `engine`, `adbcParams`, `sqlType` (native type per fixture type) and whatever of `setupLiteral`/`columnDdl`/`createTable` the engine needs.
   - The test JVM runs in a fixed non-UTC zone (`-Duser.timezone=Asia/Tbilisi`) so time zone mistakes in literals can't pass by accident.
 

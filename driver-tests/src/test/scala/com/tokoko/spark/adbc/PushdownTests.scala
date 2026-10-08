@@ -49,7 +49,7 @@ trait DataTypeTests { this: AdbcSuiteBase with CoreTests =>
   }
 
   test("write: all types round trip") {
-    assume(supportsWrite, s"$engine fixtures are not writable tables")
+    assume(supportsWrite, s"writes are not set up for $engine")
     writeTo(reference("all_types"), "write_types")
     assertSameRows(reference("all_types"), load("write_types"))
   }

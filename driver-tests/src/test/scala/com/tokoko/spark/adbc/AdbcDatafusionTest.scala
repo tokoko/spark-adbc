@@ -22,6 +22,7 @@ class AdbcDatafusionTest extends AdbcTestBase {
 
   override protected def adbcParams: Map[String, Object] = Map("jni.driver" -> "datafusion")
 
+  // The fixtures are files, not tables that could be ingested into.
   override protected def supportsWrite: Boolean = false
 
   override protected def sqlType(t: ColType): Option[String] = Some(s"arrow ${Fixtures.sparkType(t).simpleString}")
