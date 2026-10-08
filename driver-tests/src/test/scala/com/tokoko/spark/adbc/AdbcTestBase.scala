@@ -23,10 +23,13 @@ trait CoreTests { this: AdbcSuiteBase =>
 
   protected def readTable: DataFrame = load("employees")
 
+  /** Table name as bulk ingest must be given it; drivers quote it, so its case has to match. */
+  protected def ingestTable(name: String): String = name
+
   protected def writeTo(df: DataFrame, dbtable: String): Unit = {
     val base = df.write.format("com.tokoko.spark.adbc")
       .option("driver", adbcDriver)
-      .option("dbtable", dbtable)
+      .option("dbtable", ingestTable(dbtable))
       .mode("append")
     adbcParams.foldLeft(base) { case (w, (k, v)) => w.option(k, v.toString) }.save()
   }
@@ -122,7 +125,7 @@ trait CoreTests { this: AdbcSuiteBase =>
     df.show()
     val rows = df.collect()
     assert(rows.length == 1)
-    assert(rows(0).getLong(0) == 3)
+    assert(rows(0).get(0).asInstanceOf[Number].longValue() == 3)
   }
 
   test("aggregate pushdown - sum, min, max") {
@@ -236,7 +239,7 @@ trait CoreTests { this: AdbcSuiteBase =>
     val df = load("reserved_kw").orderBy("order").limit(2)
     df.show()
     assert(df.collect().length == 2)
-    assert(df.collect().map(_.getAs[Int]("order")).toSeq == Seq(10, 20))
+    assert(df.collect().map(_.getAs[Number]("order").intValue).toSeq == Seq(10, 20))
   }
 
   test("LIKE escape: wildcard in pattern is literal") {
@@ -274,8 +277,8 @@ trait CoreTests { this: AdbcSuiteBase =>
     val got = load("write_target")
     assert(got.collect().length == 3)
     val rows = got.orderBy("id").collect()
-    assert(rows.map(_.getAs[Int]("id")).toSeq == Seq(10, 11, 12))
-    assert(rows.map(_.getAs[Int]("salary")).toSeq == Seq(5000, 6000, 7000))
+    assert(rows.map(_.getAs[Number]("id").intValue).toSeq == Seq(10, 11, 12))
+    assert(rows.map(_.getAs[Number]("salary").intValue).toSeq == Seq(5000, 6000, 7000))
   }
 
   test("probe: getInfo SqlInfo codes") {

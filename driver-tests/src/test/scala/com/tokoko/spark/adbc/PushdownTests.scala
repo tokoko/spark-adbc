@@ -208,7 +208,7 @@ trait OrderLimitTests { this: AdbcSuiteBase =>
   }
 
   test("limit: over query option") {
-    val df = adbcReader.option("query", s"SELECT id, c_int FROM ${tableRef("all_types")} WHERE id <= 4").load().limit(2)
+    val df = adbcReader.option("query", s"SELECT ${quoteId("id")}, ${quoteId("c_int")} FROM ${tableRef("all_types")} WHERE ${quoteId("id")} <= 4").load().limit(2)
     assert(df.collect().length == 2)
     assertPushed(df, Set(Pushed.Limit))
   }
@@ -273,7 +273,7 @@ trait AggregateTests { this: AdbcSuiteBase =>
   aggTest("agg: with filter", "all_types")(_.filter("c_int > 0").agg(count("*"), min("c_date"), sum("c_double")))
 
   test("agg: over query option") {
-    val df = adbcReader.option("query", s"SELECT * FROM ${tableRef("sortable")} WHERE sort_key IS NOT NULL").load()
+    val df = adbcReader.option("query", s"SELECT * FROM ${tableRef("sortable")} WHERE ${quoteId("sort_key")} IS NOT NULL").load()
       .agg(sum("sort_key"), count("*"))
     val row = df.collect().head
     assert(row.getAs[Number](0).longValue == 60 && row.getAs[Number](1).longValue == 3)
