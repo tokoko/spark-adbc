@@ -236,6 +236,8 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
   private def family(dt: DataType): String = dt match {
     case ByteType | ShortType | IntegerType | LongType => "integer"
     case FloatType | DoubleType => "floating point"
+    // Engines without binary integers (Exasol, Oracle) expose INTEGER as DECIMAL(n, 0).
+    case d: DecimalType if d.scale == 0 => "integer"
     case _: DecimalType => "decimal"
     case _: StringType => "string"
     case other => other.simpleString

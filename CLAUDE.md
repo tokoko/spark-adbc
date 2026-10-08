@@ -21,7 +21,7 @@ This project uses **SBT** (Scala Build Tool) with a multi-project build.
 - **Framework:** Apache Spark 4.1.1 (DataSource V2 API)
 - **Protocol:** Apache Arrow ADBC 0.23.0
 - **Test framework:** ScalaTest (FunSuite style)
-- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, GizmoSQL via Flight SQL, Spark Connect (testcontainers)
+- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, GizmoSQL via Flight SQL, Spark Connect (testcontainers)
 
 ## Project Structure
 
@@ -65,6 +65,7 @@ driver-tests/                   # Separate subproject for driver integration tes
       AdbcGizmosqlTest.scala    # Full suite over the Flight SQL driver (DuckDB server)
       AdbcSparkConnectTest.scala # Full suite against a Spark Connect server
       Adbc{Presto,Singlestore}Test.scala  # Full suites on pre-release drivers (dbc install --pre)
+      AdbcExasolTest.scala      # Full suite; identifiers fold to upper case
       AdbcSqliteTest.scala      # Syntax probes only
       AdbcDriverPartitioningTest.scala
 ```
@@ -118,11 +119,12 @@ Orthogonal to range partitioning: the `driverPartitioning` option (`auto` | `req
 ## Testing
 
 - **Unit tests** (`src/test/`): Comet integration and JDBC benchmarks (require external PostgreSQL via Docker)
-- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, GizmoSQL (DuckDB behind Flight SQL) and Spark Connect run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>` (`--pre` for presto and singlestore).
+- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, GizmoSQL (DuckDB behind Flight SQL) and Spark Connect run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>` (`--pre` for presto and singlestore).
   - **Differential tests** (`checkSame`): the same DataFrame query runs through the connector and over an in-memory copy of the fixture; rows must match and the listed operators must really have been pushed down. Add a case by adding one line to a trait in `PushdownTests.scala`.
   - **Syntax probes** (`DialectProbeTests`): raw SQL variants for each dialect choice (limit/offset, NULLS FIRST/LAST, boolean and date/time literals, quoting, LIKE escaping, ...) sent straight through ADBC. The cross-engine result is written to `driver-tests/target/dialect-matrix.md`, together with the type mapping and known gaps.
   - **Known gaps**: a test that fails on an engine for an understood reason is listed in that suite's `knownGaps` and is cancelled instead of failed. If it starts passing, the suite fails until the entry is removed.
   - **Flight SQL**: the `flightsql` driver name says nothing about the server's SQL, so such a suite sets `dialectName`, which is passed as the `dialect` option.
+  - **Upper-case folding engines** (Exasol): fixture columns are created quoted in lower case, so the suite sets `quoteProbeColumns` (probes name columns unquoted) and `ingestTable` (bulk ingest quotes the table name).
   - **Adding an engine**: extend `AdbcTestBase`, give `engine`, `adbcParams`, `sqlType` (native type per fixture type) and whatever of `setupLiteral`/`columnDdl`/`createTable` the engine needs.
   - The test JVM runs in a fixed non-UTC zone (`-Duser.timezone=Asia/Tbilisi`) so time zone mistakes in literals can't pass by accident.
 

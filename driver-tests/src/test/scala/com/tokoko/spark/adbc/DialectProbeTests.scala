@@ -172,9 +172,36 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
     } finally stmt.close()
   }
 
+  /**
+   * Probes name columns unquoted and in lower case. On engines that fold unquoted identifiers
+   * to upper case that misses the fixture columns, which are created quoted, so such a suite
+   * turns this on and column names outside quoted text get quoted.
+   */
+  protected def quoteProbeColumns: Boolean = false
+
+  private val fixtureColumns: Set[String] =
+    Fixtures.all.flatMap(_.cols.map(_.name)).filter(_.matches("[a-z][a-z0-9_]*")).toSet
+
+  private val quotedText = """'(?:[^']|'')*'|"[^"]*"|`[^`]*`|\[[^\]]*\]""".r
+  private val word = """\b[a-z][a-z0-9_]*\b""".r
+
+  private def probeSql(sql: String): String =
+    if (!quoteProbeColumns) sql
+    else {
+      def bare(s: String): String = word.replaceAllIn(s, m =>
+        java.util.regex.Matcher.quoteReplacement(if (fixtureColumns(m.matched)) quoteId(m.matched) else m.matched))
+      val out = new StringBuilder
+      var last = 0
+      quotedText.findAllMatchIn(sql).foreach { m =>
+        out ++= bare(sql.substring(last, m.start)) ++= m.matched
+        last = m.end
+      }
+      (out ++= bare(sql.substring(last))).toString
+    }
+
   /** (group, name) -> (outcome, detail); every probe runs on its own connection. */
   private lazy val outcomes: Map[(String, String), (String, String)] = probes.map { p =>
-    val sql = p.sql(tableRef)
+    val sql = probeSql(p.sql(tableRef))
     val (outcome, detail) =
       if (!p.requires.forall { case (table, column) => hasColumn(table, column) }) (DialectReport.NotApplicable, "")
       else try {
@@ -210,7 +237,7 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
     outcomes
     val nullsFirst = (asc: Boolean) => {
       val dir = if (asc) "ASC" else "DESC"
-      Try(withConnection(firstColumn(_, s"SELECT id FROM ${tableRef("sortable")} ORDER BY sort_key $dir, id")))
+      Try(withConnection(firstColumn(_, probeSql(s"SELECT id FROM ${tableRef("sortable")} ORDER BY sort_key $dir, id"))))
         .map(r => if (r.take(2) == Seq("2", "5")) "first" else "last").getOrElse("?")
     }
     DialectReport.info(engine, "NULLs sort by default (ASC / DESC)", s"${nullsFirst(true)} / ${nullsFirst(false)}")
