@@ -78,6 +78,7 @@ object Fixtures {
   )
 
   // Float/double values are exactly representable so engines can't disagree on rounding.
+  // c_big stays within 2^53; the full 64-bit range has its own table, big_ints.
   val allTypes: TableSpec = TableSpec("all_types", allTypesCols, Seq(
     Seq(1, 1.toShort, 100, 1000000000000L, 1.5f, 2.5, dec("1234.5678"), "alpha", true,
       date("2024-01-15"), ts("2024-01-15T10:30:00"), bytes(0x01, 0x02)),
@@ -85,9 +86,9 @@ object Fixtures {
       date("1999-12-31"), ts("1999-12-31T23:59:59.999999"), bytes(0xff, 0x00)),
     Seq(3, 0.toShort, 0, 0L, 0.0f, 0.0, dec("0.0000"), "gamma", true,
       date("1970-01-01"), ts("1970-01-01T00:00:00"), bytes(0x00)),
-    Seq(4, Short.MaxValue, Int.MaxValue, Long.MaxValue, 3.25f, 1.0E10, dec("99999999999999.9999"), "ქართული", false,
+    Seq(4, Short.MaxValue, Int.MaxValue, 9007199254740991L, 3.25f, 1.0E10, dec("99999999999999.9999"), "ქართული", false,
       date("2038-01-19"), ts("2038-01-19T03:14:07.123456"), bytes(0xde, 0xad, 0xbe, 0xef)),
-    Seq(5, Short.MinValue, Int.MinValue, -Long.MaxValue, 0.125f, 1.0E-5, dec("0.0001"), "it's", true,
+    Seq(5, Short.MinValue, Int.MinValue, -9007199254740991L, 0.125f, 1.0E-5, dec("0.0001"), "it's", true,
       date("2000-02-29"), ts("2000-02-29T12:00:00.5"), bytes(0x7f)),
     Seq(6, null, null, null, null, null, null, null, null, null, null, null)
   ))
@@ -138,8 +139,14 @@ object Fixtures {
       Seq(4, null, null)
     ))
 
+  // 64-bit integers a double cannot hold exactly.
+  val bigInts: TableSpec = TableSpec("big_ints",
+    Seq(Col("id", Int32, nullable = false), Col("v", Int64)),
+    // Seq[Any], or Scala widens the Int ids to Long alongside the Long values.
+    Seq(Seq[Any](1, Long.MaxValue), Seq[Any](2, -Long.MaxValue), Seq[Any](3, 9007199254740993L), Seq[Any](4, null)))
+
   val all: Seq[TableSpec] = Seq(employees, writeTarget, reservedKw, events, sortable, allTypes, writeTypes,
-    strings, tzEvents, quirkyNames, smallDecimals)
+    strings, tzEvents, quirkyNames, smallDecimals, bigInts)
 
   def byName(name: String): TableSpec = all.find(_.name == name).getOrElse(sys.error(s"no fixture table $name"))
 

@@ -15,6 +15,7 @@ object Gaps {
 
   // ---- type mapping problems between driver, Arrow Java and Spark ----
 
+  val BigintViaDouble = "types: driver reads BIGINT through a double, so values beyond 2^53 are corrupted"
   val NarrowDecimal = "types: driver returns decimal32/decimal64, which Arrow Java 18 reads as 128-bit garbage"
   val WideDecimal = "types: aggregate result is a decimal wider than Spark's maximum precision of 38"
   val UnsignedCount = "types: COUNT returns UInt64, which Spark has no Arrow mapping for"
