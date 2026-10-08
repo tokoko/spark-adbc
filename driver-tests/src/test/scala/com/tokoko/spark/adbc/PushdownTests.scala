@@ -37,6 +37,10 @@ trait DataTypeTests { this: AdbcSuiteBase with CoreTests =>
     checkSame("small_decimals")(identity)
   }
 
+  test("types: 64-bit integers beyond double precision") {
+    checkSame("big_ints")(identity)
+  }
+
   test("types: timestamp with time zone") {
     assume(hasColumn("tz_events", "ts_tz"), s"$engine has no timestamp with time zone type")
     checkSame("tz_events")(identity)
@@ -76,7 +80,7 @@ trait LiteralPushdownTests { this: AdbcSuiteBase =>
   filterTest("literal int: negative", "all_types", "c_int")(expr("c_int < -50"))
   filterTest("literal int: IN list", "all_types", "c_int")(expr("c_int IN (100, -100, 0)"))
   filterTest("literal smallint: lower bound", "all_types", "c_small")(expr("c_small = -32768"))
-  filterTest("literal bigint: upper bound", "all_types", "c_big")(expr("c_big = 9223372036854775807"))
+  filterTest("literal bigint: upper bound", "big_ints", "v")(expr("v = 9223372036854775807"))
   filterTest("literal float: equality", "all_types", "c_real")(expr("c_real = 1.5"))
   filterTest("literal double: comparison", "all_types", "c_double")(expr("c_double > 2.4"))
   filterTest("literal double: large exponent", "all_types", "c_double")(expr("c_double >= 1.0E10"))
@@ -228,7 +232,7 @@ trait OrderLimitTests { this: AdbcSuiteBase =>
   topNTest("topN: two nullable keys in opposite directions", "all_types")(
     _.select("id", "c_bool", "c_int").orderBy(col("c_bool").desc, col("c_int").asc, col("id").asc).limit(4))
   topNTest("topN: by date", "all_types")(_.select("id", "c_date").orderBy(col("c_date").desc, col("id").asc).limit(3))
-  topNTest("topN: by timestamp", "all_types")(_.select("id", "c_ts").orderBy(col("c_ts").asc, col("id").asc).limit(3))
+  topNTest("topN: by timestamp", "all_types", requires = Seq("c_ts"))(_.select("id", "c_ts").orderBy(col("c_ts").asc, col("id").asc).limit(3))
   topNTest("topN: by decimal", "all_types", requires = Seq("c_dec"))(_.select("id", "c_dec").orderBy(col("c_dec").desc, col("id").asc).limit(3))
   topNTest("topN: by double", "all_types")(_.select("id", "c_double").orderBy(col("c_double").asc, col("id").asc).limit(4))
   topNTest("topN: by string", "employees")(_.orderBy(col("name").asc, col("id").asc).limit(2))
