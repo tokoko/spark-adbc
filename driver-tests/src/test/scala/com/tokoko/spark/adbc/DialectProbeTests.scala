@@ -31,6 +31,8 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
   private val LikeGroup = "LIKE escaping (523 SQL_SUPPORTS_LIKE_ESCAPE_CLAUSE covers the clause only)"
   private val DerivedGroup = "Derived tables (no flag)"
   private val AggGroup = "Aggregate semantics (no flag)"
+  private val FloatGroup = "Float literals (no flag)"
+  private val BinaryGroup = "Binary literals (no flag)"
 
   private def ids(xs: Int*): Rows = Rows(xs.map(_.toString))
 
@@ -48,6 +50,8 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
       s"SELECT id FROM ${t("sortable")} ORDER BY id OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY")
     add(LimitGroup, "FETCH FIRST n ROWS ONLY, no OFFSET", ids(1, 2))(t =>
       s"SELECT id FROM ${t("sortable")} ORDER BY id FETCH FIRST 2 ROWS ONLY")
+    add(LimitGroup, "FETCH FIRST n ROWS ONLY without ORDER BY", Count(2))(t =>
+      s"SELECT id FROM ${t("sortable")} FETCH FIRST 2 ROWS ONLY")
     add(LimitGroup, "OFFSET m ROWS, no FETCH", ids(4, 5))(t => s"SELECT id FROM ${t("sortable")} ORDER BY id OFFSET 3 ROWS")
     add(LimitGroup, "SELECT TOP n", ids(1, 2))(t => s"SELECT TOP 2 id FROM ${t("sortable")} ORDER BY id")
     add(LimitGroup, "LIMIT n without ORDER BY", Count(2))(t => s"SELECT id FROM ${t("sortable")} LIMIT 2")
@@ -56,7 +60,7 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
     add(LimitGroup, "OFFSET/FETCH after ORDER BY (SELECT NULL)", Count(2))(t =>
       s"SELECT id FROM ${t("sortable")} ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY")
     add(LimitGroup, "LIMIT n inside a derived table", ids(2))(t =>
-      s"SELECT COUNT(*) FROM (SELECT id FROM ${t("sortable")} LIMIT 2) AS x")
+      s"SELECT COUNT(*) FROM (SELECT id FROM ${t("sortable")} LIMIT 2) x")
 
     // ---- 578 ----
     add(NullsGroup, "ASC NULLS FIRST", ids(2, 5, 1, 4, 3))(t => s"SELECT id FROM ${t("sortable")} ORDER BY sort_key ASC NULLS FIRST, id")
@@ -142,12 +146,48 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
     add(DerivedGroup, "(subquery) alias", ids(5))(t => s"SELECT COUNT(*) FROM (SELECT id FROM ${t("sortable")}) T")
     add(DerivedGroup, "(subquery) without alias", ids(5))(t => s"SELECT COUNT(*) FROM (SELECT id FROM ${t("sortable")})")
     add(DerivedGroup, "WHERE 1=0 around a derived table", Count(0))(t =>
-      s"SELECT * FROM (SELECT id FROM ${t("sortable")}) AS T WHERE 1=0")
+      s"SELECT * FROM (SELECT id FROM ${t("sortable")}) T WHERE 1=0")
 
     add(AggGroup, "COUNT(DISTINCT x)", ids(3))(t => s"SELECT COUNT(DISTINCT sort_key) FROM ${t("sortable")}")
     add(AggGroup, "AVG(int) keeps the fraction", Rows(Seq("1.5")))(t => s"SELECT AVG(id) FROM ${t("sortable")} WHERE id <= 2")
     add(AggGroup, "SUM(int) widens past 32 bits", Rows(Seq("2147483747")), "all_types" -> "c_int")(t =>
       s"SELECT SUM(c_int) FROM ${t("all_types")} WHERE id IN (1, 4)")
+
+    // Row 4 of all_types holds the four bytes DE AD BE EF.
+    val cBin = "all_types" -> "c_bin"
+    def binary(name: String, literal: String): Unit =
+      add(BinaryGroup, name, ids(4), cBin)(t => s"SELECT id FROM ${t("all_types")} WHERE c_bin = $literal")
+    binary("X'DEADBEEF'", "X'DEADBEEF'")
+    binary("0xDEADBEEF", "0xDEADBEEF")
+    binary("'\\xDEADBEEF' string", "'\\xDEADBEEF'")
+    binary("'\\xDE\\xAD\\xBE\\xEF' string", "'\\xDE\\xAD\\xBE\\xEF'")
+    binary("HEXTORAW('DEADBEEF')", "HEXTORAW('DEADBEEF')")
+    binary("UNHEX('DEADBEEF')", "UNHEX('DEADBEEF')")
+    binary("FROM_HEX('DEADBEEF')", "FROM_HEX('DEADBEEF')")
+    binary("DECODE('DEADBEEF', 'hex')", "DECODE('DEADBEEF', 'hex')")
+
+    // Row 1 holds 1.1 as a 32-bit float, which is exactly 1.10000002384185791015625.
+    val f32 = "floats" -> "f32"
+    add(FloatGroup, "float32: shortest form", ids(1), f32)(t => s"SELECT id FROM ${t("floats")} WHERE f32 = 1.1")
+    add(FloatGroup, "float32: exact decimal expansion", ids(1), f32)(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f32 = 1.10000002384185791015625")
+    add(FloatGroup, "float32: nine significant digits", ids(1), f32)(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f32 = 1.10000002")
+    add(FloatGroup, "float32: widened to double, shortest form", ids(1), f32)(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f32 = 1.100000023841858")
+    add(FloatGroup, "float32: CAST(1.1 AS REAL)", ids(1), f32)(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f32 = CAST(1.1 AS REAL)")
+    add(FloatGroup, "float32: REAL '1.1'", ids(1), f32)(t => s"SELECT id FROM ${t("floats")} WHERE f32 = REAL '1.1'")
+    add(FloatGroup, "float64: shortest form", ids(1))(t => s"SELECT id FROM ${t("floats")} WHERE f64 = 0.1")
+    add(FloatGroup, "float64: 16 digits", ids(2))(t => s"SELECT id FROM ${t("floats")} WHERE f64 = 0.3333333333333333")
+    add(FloatGroup, "float64: exponent form", ids(1))(t => s"SELECT id FROM ${t("floats")} WHERE f64 = 1.0E-1")
+    // No row holds NaN, so a spelling the engine understands returns nothing.
+    add(FloatGroup, "NaN: bare keyword", Count(0))(t => s"SELECT id FROM ${t("floats")} WHERE f64 = NaN")
+    add(FloatGroup, "NaN: CAST('NaN' AS DOUBLE PRECISION)", Count(0))(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f64 = CAST('NaN' AS DOUBLE PRECISION)")
+    add(FloatGroup, "NaN: CAST('NaN' AS DOUBLE)", Count(0))(t =>
+      s"SELECT id FROM ${t("floats")} WHERE f64 = CAST('NaN' AS DOUBLE)")
+    add(FloatGroup, "Infinity: bare keyword", Count(0))(t => s"SELECT id FROM ${t("floats")} WHERE f64 = Infinity")
     b.toSeq
   }
 
@@ -155,49 +195,9 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
     val stmt = conn.createStatement()
     try {
       stmt.setSqlQuery(sql)
-      val result = stmt.executeQuery()
-      try {
-        val reader = result.getReader
-        val out = ArrayBuffer[String]()
-        while (reader.loadNextBatch()) {
-          val v = reader.getVectorSchemaRoot.getVector(0)
-          for (i <- 0 until v.getValueCount) out += (v.getObject(i) match {
-            case null => "NULL"
-            case n: Number => new java.math.BigDecimal(n.toString).stripTrailingZeros.toPlainString
-            case other => other.toString
-          })
-        }
-        out.toSeq
-      } finally result.close()
+      readFirstColumn(stmt.executeQuery())
     } finally stmt.close()
   }
-
-  /**
-   * Probes name columns unquoted and in lower case. On engines that fold unquoted identifiers
-   * to upper case that misses the fixture columns, which are created quoted, so such a suite
-   * turns this on and column names outside quoted text get quoted.
-   */
-  protected def quoteProbeColumns: Boolean = false
-
-  private val fixtureColumns: Set[String] =
-    Fixtures.all.flatMap(_.cols.map(_.name)).filter(_.matches("[a-z][a-z0-9_]*")).toSet
-
-  private val quotedText = """'(?:[^']|'')*'|"[^"]*"|`[^`]*`|\[[^\]]*\]""".r
-  private val word = """\b[a-z][a-z0-9_]*\b""".r
-
-  private def probeSql(sql: String): String =
-    if (!quoteProbeColumns) sql
-    else {
-      def bare(s: String): String = word.replaceAllIn(s, m =>
-        java.util.regex.Matcher.quoteReplacement(if (fixtureColumns(m.matched)) quoteId(m.matched) else m.matched))
-      val out = new StringBuilder
-      var last = 0
-      quotedText.findAllMatchIn(sql).foreach { m =>
-        out ++= bare(sql.substring(last, m.start)) ++= m.matched
-        last = m.end
-      }
-      (out ++= bare(sql.substring(last))).toString
-    }
 
   /** (group, name) -> (outcome, detail); every probe runs on its own connection. */
   private lazy val outcomes: Map[(String, String), (String, String)] = probes.map { p =>
@@ -267,12 +267,18 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
       "KEYWORD_WITH_OFFSET" -> accepted(DateTimeGroup, "timestamptz: TIMESTAMP '... +05:30'"),
       "WITH_TIME_ZONE_KEYWORD" -> accepted(DateTimeGroup, "timestamptz: TIMESTAMP WITH TIME ZONE '... +05:30'"),
       "BARE_STRING_WITH_OFFSET" -> accepted(DateTimeGroup, "timestamptz: bare '... +05:30'")))
+    DialectReport.info(engine, "binary literal forms the engine accepts", bits(
+      Seq("X'DEADBEEF'", "0xDEADBEEF", "'\\xDEADBEEF' string", "'\\xDE\\xAD\\xBE\\xEF' string",
+        "HEXTORAW('DEADBEEF')", "UNHEX('DEADBEEF')", "FROM_HEX('DEADBEEF')", "DECODE('DEADBEEF', 'hex')")
+        .map(n => n -> accepted(BinaryGroup, n)): _*))
     DialectReport.info(engine, "connector dialect", dialect.productIterator.mkString(", "))
   }
 
   test("dialect: configured limit syntax is accepted") {
     dialect.limitOffsetSyntax match {
       case LimitOffsetSyntax.LimitOffset => requireAccepted(LimitGroup, "LIMIT n", "LIMIT n without ORDER BY")
+      case LimitOffsetSyntax.FetchFirst =>
+        requireAccepted(LimitGroup, "FETCH FIRST n ROWS ONLY, no OFFSET", "FETCH FIRST n ROWS ONLY without ORDER BY")
       case LimitOffsetSyntax.OffsetFetch =>
         requireAccepted(LimitGroup, "OFFSET m ROWS FETCH NEXT n ROWS ONLY", "OFFSET/FETCH after ORDER BY (SELECT NULL)")
     }
@@ -339,6 +345,6 @@ trait DialectProbeTests { this: AdbcSuiteBase =>
 
   // Emitted for every engine, whatever the dialect.
   test("dialect: aliased derived table and WHERE 1=0 are accepted") {
-    requireAccepted(DerivedGroup, "(subquery) AS alias", "WHERE 1=0 around a derived table")
+    requireAccepted(DerivedGroup, "(subquery) alias", "WHERE 1=0 around a derived table")
   }
 }

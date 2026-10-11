@@ -128,8 +128,12 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
 
   protected def supportedCols(spec: TableSpec): Seq[Col] = spec.cols.filter(c => sqlType(c.tpe).isDefined)
 
+  /** False where the engine's narrowest float is 64-bit, so floats.f32 is really a double. */
+  protected def hasNativeFloat32: Boolean = true
+
   protected def hasColumn(table: String, column: String): Boolean =
-    supportedCols(Fixtures.byName(table)).exists(_.name == column)
+    supportedCols(Fixtures.byName(table)).exists(_.name == column) &&
+      (hasNativeFloat32 || (table, column) != ("floats", "f32"))
 
   protected def createTable(spec: TableSpec): Unit = withConnection { conn =>
     val keep = spec.cols.indices.filter(i => sqlType(spec.cols(i).tpe).isDefined)
@@ -155,6 +159,51 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
       stopDatabase()
     }
   }
+
+  // ---- raw SQL probes ----
+
+  /**
+   * Probes name columns unquoted and in lower case. On engines that fold unquoted identifiers
+   * to upper case that misses the fixture columns, which are created quoted, so such a suite
+   * turns this on and column names outside quoted text get quoted.
+   */
+  protected def quoteProbeColumns: Boolean = false
+
+  private val fixtureColumns: Set[String] =
+    Fixtures.all.flatMap(_.cols.map(_.name)).filter(_.matches("[a-z][a-z0-9_]*")).toSet
+
+  private val quotedText = """'(?:[^']|'')*'|"[^"]*"|`[^`]*`|\[[^\]]*\]""".r
+  private val word = """\b[a-z][a-z0-9_]*\b""".r
+
+  protected def probeSql(sql: String): String =
+    if (!quoteProbeColumns) sql
+    else {
+      def bare(s: String): String = word.replaceAllIn(s, m =>
+        java.util.regex.Matcher.quoteReplacement(if (fixtureColumns(m.matched)) quoteId(m.matched) else m.matched))
+      val out = new StringBuilder
+      var last = 0
+      quotedText.findAllMatchIn(sql).foreach { m =>
+        out ++= bare(sql.substring(last, m.start)) ++= m.matched
+        last = m.end
+      }
+      (out ++= bare(sql.substring(last))).toString
+    }
+
+  /** First column of a query result, rendered so that numeric types compare by value. */
+  protected def readFirstColumn(result: org.apache.arrow.adbc.core.AdbcStatement.QueryResult): Seq[String] =
+    try {
+      val reader = result.getReader
+      val out = scala.collection.mutable.ArrayBuffer[String]()
+      while (reader.loadNextBatch()) {
+        val v = reader.getVectorSchemaRoot.getVector(0)
+        for (i <- 0 until v.getValueCount) out += (v.getObject(i) match {
+          case null => "NULL"
+          case n: Number => new java.math.BigDecimal(n.toString).stripTrailingZeros.toPlainString
+          case other => other.toString
+        })
+      }
+      out.toSeq
+    } finally result.close()
 
   // ---- known gaps ----
 
@@ -268,7 +317,7 @@ abstract class AdbcSuiteBase extends AnyFunSuite with BeforeAndAfterAll {
       case Pushed.TopN =>
         assert(sql.nonEmpty && sql.forall(_.contains(" ORDER BY ")), s"topN was not pushed down$shown")
       case Pushed.Limit =>
-        assert(sql.nonEmpty && sql.forall(s => s.contains(" LIMIT ") || s.contains(" FETCH NEXT ")),
+        assert(sql.nonEmpty && sql.forall(s => Seq(" LIMIT ", " FETCH NEXT ", " FETCH FIRST ").exists(s.contains)),
           s"limit was not pushed down$shown")
     }
   }

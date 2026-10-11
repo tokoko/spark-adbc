@@ -11,7 +11,10 @@ object IdentifierQuote {
 sealed trait LimitOffsetSyntax
 object LimitOffsetSyntax {
   case object LimitOffset extends LimitOffsetSyntax
+  /** `ORDER BY ... OFFSET 0 ROWS FETCH NEXT n ROWS ONLY`; the ORDER BY is mandatory (SQL Server). */
   case object OffsetFetch extends LimitOffsetSyntax
+  /** `FETCH FIRST n ROWS ONLY`, with or without an ORDER BY (Oracle, and the SQL standard). */
+  case object FetchFirst extends LimitOffsetSyntax
 }
 
 sealed trait NullsOrderingSyntax
@@ -141,6 +144,12 @@ object SqlDialect {
     instantLiteral = InstantLiteral.KeywordWithOffset
   )
 
+  // Oracle has no LIMIT. BOOLEAN and its TRUE/FALSE literals exist from 23ai on.
+  val Oracle: SqlDialect = Default.copy(
+    limitOffsetSyntax = LimitOffsetSyntax.FetchFirst,
+    instantLiteral = InstantLiteral.KeywordWithOffset
+  )
+
   val Datafusion: SqlDialect = Default.copy(likeEscapeSyntax = LikeEscapeSyntax.ImplicitBackslash)
 
   def apply(name: String): SqlDialect = name.toLowerCase match {
@@ -150,6 +159,7 @@ object SqlDialect {
     case "clickhouse" | "chdb" => Clickhouse
     case "trino" | "presto" => Trino
     case "spark" => Spark
+    case "oracle" => Oracle
     case "datafusion" => Datafusion
     case _ => Default
   }
@@ -170,6 +180,7 @@ object SqlBuilder {
       case Some(n) => dialect.limitOffsetSyntax match {
         case LimitOffsetSyntax.LimitOffset => s" LIMIT $n"
         case LimitOffsetSyntax.OffsetFetch => s" OFFSET 0 ROWS FETCH NEXT $n ROWS ONLY"
+        case LimitOffsetSyntax.FetchFirst => s" FETCH FIRST $n ROWS ONLY"
       }
     }
 

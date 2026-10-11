@@ -27,6 +27,9 @@ object FilterConverter {
     // Binary literals have no portable spelling, so comparisons against them stay in Spark.
     case _: Array[_] => false
     case _: java.sql.Timestamp | _: java.time.Instant => dialect.instantLiteral != InstantLiteral.Unsupported
+    // NaN and infinity are spelled differently by nearly every engine, and some have neither.
+    case f: Float => !f.isNaN && !f.isInfinite
+    case d: Double => !d.isNaN && !d.isInfinite
     case _ => true
   }
 
@@ -77,6 +80,10 @@ object FilterConverter {
     case t: java.sql.Timestamp => instantLiteral(t.toInstant, dialect)
     case t: java.time.LocalDateTime => timestampLiteral(t.format(localDateTimeFormat), dialect)
     case t: java.time.Instant => instantLiteral(t, dialect)
+    // A float is written as the double it widens to (1.1f as 1.100000023841858). The short
+    // form 1.1 is read as a double or decimal by many engines and then no longer equals the
+    // column; the widened form compares equal whether the engine narrows or widens.
+    case f: Float => f.toDouble.toString
     case v => v.toString
   }
 

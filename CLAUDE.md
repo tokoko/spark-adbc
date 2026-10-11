@@ -21,7 +21,7 @@ This project uses **SBT** (Scala Build Tool) with a multi-project build.
 - **Framework:** Apache Spark 4.1.1 (DataSource V2 API)
 - **Protocol:** Apache Arrow ADBC 0.23.0
 - **Test framework:** ScalaTest (FunSuite style)
-- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, GizmoSQL via Flight SQL, Spark Connect (testcontainers)
+- **Test databases:** DuckDB, DataFusion, SQLite (embedded); PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, Oracle, GizmoSQL via Flight SQL, Spark Connect (testcontainers)
 
 ## Project Structure
 
@@ -43,7 +43,7 @@ src/main/scala/
     AdbcDataWriterFactory.scala
     AdbcDataWriter.scala        # Write path: buffers rows, bulk inserts
     AdbcWriterCommitMessage.scala
-    SqlDialect.scala            # SQL dialect flags (Default, MSSQL, MySQL, SingleStore, ClickHouse, DataFusion, Trino, Spark)
+    SqlDialect.scala            # SQL dialect flags (Default, MSSQL, MySQL, SingleStore, ClickHouse, DataFusion, Trino, Spark, Oracle)
     FilterConverter.scala       # Spark filter -> SQL WHERE conversion
   org/apache/spark/sql/util/
     ArrowUtilsExtended.scala    # Arrow <-> Spark format conversion utilities
@@ -66,6 +66,7 @@ driver-tests/                   # Separate subproject for driver integration tes
       AdbcSparkConnectTest.scala # Full suite against a Spark Connect server
       Adbc{Presto,Singlestore}Test.scala  # Full suites on pre-release drivers (dbc install --pre)
       AdbcExasolTest.scala      # Full suite; identifiers fold to upper case
+      AdbcOracleTest.scala      # Full suite on the gizmodata driver (not from dbc, see Testing)
       AdbcSqliteTest.scala      # Syntax probes only
       AdbcDriverPartitioningTest.scala
 ```
@@ -90,6 +91,7 @@ Set via the `dialect` option:
 - **`mysql`** — backtick identifiers, no `NULLS FIRST/LAST`, bare-string date/time and instant literals, backslash escapes
 - **`clickhouse`** (also `chdb`) — bare-string date/time literals, implicit-backslash LIKE, backslash escapes, no instant literal
 - **`datafusion`** — like default but implicit-backslash LIKE
+- **`oracle`** — like default but `FETCH FIRST n ROWS ONLY` and `TIMESTAMP '...+00:00'` for instants
 - **`trino`** (also `presto`) — like default but `TIMESTAMP '...+00:00'` for instants
 - **`singlestore`** — like mysql but with `NULLS FIRST/LAST`, implicit-backslash LIKE, no instant literal
 - **`spark`** — backtick identifiers, backslash escapes, `TIMESTAMP '...+00:00'` for instants
@@ -119,12 +121,13 @@ Orthogonal to range partitioning: the `driverPartitioning` option (`auto` | `req
 ## Testing
 
 - **Unit tests** (`src/test/`): Comet integration and JDBC benchmarks (require external PostgreSQL via Docker)
-- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, GizmoSQL (DuckDB behind Flight SQL) and Spark Connect run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>` (`--pre` for presto and singlestore).
+- **Driver tests** (`driver-tests/`): one suite per engine, all sharing the tables in `Fixtures.scala`. PostgreSQL, MySQL, MSSQL, ClickHouse, Trino, Presto, SingleStore, Exasol, Oracle, GizmoSQL (DuckDB behind Flight SQL) and Spark Connect run in testcontainers (require Docker); DuckDB, DataFusion and SQLite are embedded. Native drivers come from `dbc install <name>` (`--pre` for presto and singlestore).
   - **Differential tests** (`checkSame`): the same DataFrame query runs through the connector and over an in-memory copy of the fixture; rows must match and the listed operators must really have been pushed down. Add a case by adding one line to a trait in `PushdownTests.scala`.
   - **Syntax probes** (`DialectProbeTests`): raw SQL variants for each dialect choice (limit/offset, NULLS FIRST/LAST, boolean and date/time literals, quoting, LIKE escaping, ...) sent straight through ADBC. The cross-engine result is written to `driver-tests/target/dialect-matrix.md`, together with the type mapping and known gaps.
   - **Known gaps**: a test that fails on an engine for an understood reason is listed in that suite's `knownGaps` and is cancelled instead of failed. If it starts passing, the suite fails until the entry is removed.
   - **Flight SQL**: the `flightsql` driver name says nothing about the server's SQL, so such a suite sets `dialectName`, which is passed as the `dialect` option.
-  - **Upper-case folding engines** (Exasol): fixture columns are created quoted in lower case, so the suite sets `quoteProbeColumns` (probes name columns unquoted) and `ingestTable` (bulk ingest quotes the table name).
+  - **Upper-case folding engines** (Exasol, Oracle): fixture columns are created quoted in lower case, so the suite sets `quoteProbeColumns` (probes name columns unquoted) and `ingestTable` (bulk ingest quotes the table name).
+  - **Oracle driver**: the `oracle` driver in the dbc registry is private, so the suite uses https://github.com/gizmodata/adbc-driver-oracle. Download `libadbc_driver_oracle-linux-amd64.so` from its releases and register it with a manifest at `~/.config/adbc/drivers/oracle-gizmodata.toml` that sets `[Driver] entrypoint = 'OracleDriverInit'` and `[Driver.shared] linux_amd64 = '<path to the .so>'`.
   - **Adding an engine**: extend `AdbcTestBase`, give `engine`, `adbcParams`, `sqlType` (native type per fixture type) and whatever of `setupLiteral`/`columnDdl`/`createTable` the engine needs.
   - The test JVM runs in a fixed non-UTC zone (`-Duser.timezone=Asia/Tbilisi`) so time zone mistakes in literals can't pass by accident.
 

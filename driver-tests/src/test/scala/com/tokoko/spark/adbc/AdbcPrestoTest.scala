@@ -79,6 +79,7 @@ class AdbcPrestoTest extends AdbcTestBase {
   }
 
   override protected def knownGaps: Map[String, String] = Map(
+    "types: floats with no exact binary form" -> Gaps.FloatDigits,
     "types: 64-bit integers beyond double precision" -> Gaps.BigintViaDouble,
     "literal bigint: upper bound" -> Gaps.BigintViaDouble,
     "write: all types round trip" -> Gaps.IngestTypes

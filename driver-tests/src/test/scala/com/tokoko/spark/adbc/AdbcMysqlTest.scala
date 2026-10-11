@@ -54,6 +54,7 @@ class AdbcMysqlTest extends AdbcTestBase {
   }
 
   override protected def knownGaps: Map[String, String] = Map(
+    "types: floats with no exact binary form" -> Gaps.FloatDigits,
     "types: decimals narrower than 64 bits" -> Gaps.NarrowDecimal,
     "write: all types round trip" -> Gaps.BooleanAsTinyint,
     "literal string: equality" -> Gaps.Collation,

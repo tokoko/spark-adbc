@@ -80,6 +80,7 @@ class AdbcTrinoTest extends AdbcTestBase {
   }
 
   override protected def knownGaps: Map[String, String] = Map(
+    "types: floats with no exact binary form" -> Gaps.FloatDigits,
     "types: decimals narrower than 64 bits" -> Gaps.NarrowDecimal
   )
 

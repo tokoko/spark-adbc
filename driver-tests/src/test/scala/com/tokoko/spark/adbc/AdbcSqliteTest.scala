@@ -7,7 +7,7 @@ import java.io.File
  * connector's zero-row schema probe sees every column as int64 and reads through Spark don't
  * work; the dialect itself is still worth having in the matrix.
  */
-class AdbcSqliteTest extends AdbcSuiteBase with DialectProbeTests {
+class AdbcSqliteTest extends AdbcSuiteBase with DialectProbeTests with BindProbeTests {
 
   private val dbFile = new File("test.sqlite")
 
@@ -25,6 +25,9 @@ class AdbcSqliteTest extends AdbcSuiteBase with DialectProbeTests {
     "jni.driver" -> "sqlite",
     "uri" -> dbFile.getAbsolutePath
   )
+
+  // The only floating point type is 64-bit.
+  override protected def hasNativeFloat32: Boolean = false
 
   // Dates and timestamps are stored as ISO 8601 text; there is no time zone aware type.
   override protected def sqlType(t: ColType): Option[String] = t match {
