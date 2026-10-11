@@ -17,7 +17,7 @@ class DefaultSource extends TableProvider{
 
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val baseRelation = Option(options.get("dbtable")).getOrElse {
-      s"(${options.get("query")}) AS T"
+      s"(${options.get("query")}) T"
     }
     val driver = options.get("driver")
 

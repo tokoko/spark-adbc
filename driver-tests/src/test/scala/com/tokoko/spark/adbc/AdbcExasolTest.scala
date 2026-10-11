@@ -56,6 +56,9 @@ class AdbcExasolTest extends AdbcTestBase {
   // Fixture tables are created unquoted, so their stored names are upper case.
   override protected def ingestTable(name: String): String = name.toUpperCase
 
+  // The only floating point type is 64-bit.
+  override protected def hasNativeFloat32: Boolean = false
+
   // Every integer type is a DECIMAL(n, 0) and FLOAT is a double. There is no binary type, and
   // TIMESTAMP WITH LOCAL TIME ZONE comes back as a zone-less timestamp in the session zone.
   override protected def sqlType(t: ColType): Option[String] = t match {

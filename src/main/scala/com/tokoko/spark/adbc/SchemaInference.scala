@@ -15,7 +15,7 @@ object SchemaInference {
       case e: AdbcException if e.getStatus == AdbcStatusCode.NOT_IMPLEMENTED =>
         val stmt = conn.createStatement()
         try {
-          stmt.setSqlQuery(s"SELECT * FROM ($query) AS t WHERE 1=0")
+          stmt.setSqlQuery(s"SELECT * FROM ($query) t WHERE 1=0")
           val result = stmt.executeQuery()
           try result.getReader.getVectorSchemaRoot.getSchema
           finally result.close()

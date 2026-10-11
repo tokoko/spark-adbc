@@ -2,7 +2,7 @@ package com.tokoko.spark.adbc
 
 import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.TimestampType
+import org.apache.spark.sql.types.{FloatType, TimestampType}
 
 import java.time.Instant
 
@@ -39,6 +39,10 @@ trait DataTypeTests { this: AdbcSuiteBase with CoreTests =>
 
   test("types: 64-bit integers beyond double precision") {
     checkSame("big_ints")(identity)
+  }
+
+  test("types: floats with no exact binary form") {
+    checkSame("floats")(identity)
   }
 
   test("types: timestamp with time zone") {
@@ -88,6 +92,21 @@ trait LiteralPushdownTests { this: AdbcSuiteBase =>
   filterTest("literal decimal: equality", "all_types", "c_dec")(expr("c_dec = 1234.5678"))
   filterTest("literal decimal: full precision", "all_types", "c_dec")(expr("c_dec >= 99999999999999.9999"))
   filterTest("literal decimal: negative", "all_types", "c_dec")(expr("c_dec < -0.5"))
+
+  test("literal float: value with no exact binary form") {
+    assume(hasColumn("floats", "f32"), s"$engine has no 32-bit float type")
+    assume(adbcSchema("floats")("f32").dataType == FloatType, "driver does not expose the column as a 32-bit float")
+    checkSame("floats", pushed = Set(Pushed.Filter))(_.filter(col("f32") === lit(1.1f)))
+    checkSame("floats", pushed = Set(Pushed.Filter))(_.filter(col("f32") > lit(0.3f)))
+  }
+
+  filterTest("literal double: value with no exact binary form", "floats", "f64")(
+    col("f64") === lit(0.1) || col("f64") === lit(1.0 / 3.0))
+
+  test("literal double: NaN and infinity stay in Spark") {
+    checkSame("floats")(_.select("id", "f64").filter(col("f64") === lit(Double.NaN)))
+    checkSame("floats")(_.select("id", "f64").filter(col("f64") < lit(Double.PositiveInfinity)))
+  }
 
   // ---- strings ----
 

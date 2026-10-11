@@ -15,6 +15,7 @@ abstract class AdbcTestBase extends AdbcSuiteBase
   with OrderLimitTests
   with AggregateTests
   with DialectProbeTests
+  with BindProbeTests
 
 trait CoreTests { this: AdbcSuiteBase =>
 

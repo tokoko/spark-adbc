@@ -110,7 +110,8 @@ class AdbcScanBuilder(
   override def build(): Scan = {
     val baseRelation = dbtable match {
       case Some(table) => table
-      case None => s"(${query.get}) AS T"
+      // No AS: Oracle rejects it before a table alias, and nothing requires it.
+      case None => s"(${query.get}) T"
     }
 
     val filterPredicates = pushedFilterArray.map(f => FilterConverter.convert(f, dialect)).toSeq

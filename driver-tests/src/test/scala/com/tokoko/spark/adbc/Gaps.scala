@@ -16,9 +16,12 @@ object Gaps {
   // ---- type mapping problems between driver, Arrow Java and Spark ----
 
   val BigintViaDouble = "types: driver reads BIGINT through a double, so values beyond 2^53 are corrupted"
+  val AggregateAsDouble = "types: driver returns aggregate results as doubles, losing digits beyond the 15th"
+  val FloatDigits = "types: a 32-bit float with more than six significant digits comes back changed"
   val NarrowDecimal = "types: driver returns decimal32/decimal64, which Arrow Java 18 reads as 128-bit garbage"
   val WideDecimal = "types: aggregate result is a decimal wider than Spark's maximum precision of 38"
   val UnsignedCount = "types: COUNT returns UInt64, which Spark has no Arrow mapping for"
   val BooleanAsTinyint = "types: BOOLEAN is read back as tinyint"
+  val IngestColumnCase = "types: driver upper-cases column names on bulk ingest, so quoted lower-case columns are not found"
   val IngestTypes = "types: driver bulk ingest rejects or mangles one of the fixture column types"
 }

@@ -145,8 +145,19 @@ object Fixtures {
     // Seq[Any], or Scala widens the Int ids to Long alongside the Long values.
     Seq(Seq[Any](1, Long.MaxValue), Seq[Any](2, -Long.MaxValue), Seq[Any](3, 9007199254740993L), Seq[Any](4, null)))
 
+  // Values with no exact binary representation, unlike the ones in all_types.
+  val floats: TableSpec = TableSpec("floats",
+    Seq(Col("id", Int32, nullable = false), Col("f32", Float32), Col("f64", Float64)),
+    // Seq[Any], or Scala widens the ints and floats to Double alongside the doubles.
+    Seq(
+      Seq[Any](1, 1.1f, 0.1),
+      Seq[Any](2, 0.3f, 1.0 / 3.0),
+      Seq[Any](3, -2.7182817f, 2.718281828459045),
+      Seq[Any](4, null, null)
+    ))
+
   val all: Seq[TableSpec] = Seq(employees, writeTarget, reservedKw, events, sortable, allTypes, writeTypes,
-    strings, tzEvents, quirkyNames, smallDecimals, bigInts)
+    strings, tzEvents, quirkyNames, smallDecimals, bigInts, floats)
 
   def byName(name: String): TableSpec = all.find(_.name == name).getOrElse(sys.error(s"no fixture table $name"))
 
